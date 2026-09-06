@@ -1,4 +1,4 @@
-"""Planning service used by the planning subgraph and Plan tool."""
+"""Planning service used by the model-backed stage and Plan tool."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ class PlanningService:
 
     This deterministic planner is intentionally small.  The main Agent is the
     source of task understanding; Planning only normalises that understanding
-    into a stable, inspectable structure.  A model-backed planner can replace
-    this class without changing the subgraph.
+    into a stable, inspectable structure. A model-backed planner can replace
+    this class without changing the tool contract.
     """
 
     def create_plan(self, request: PlanningRequest) -> PlanningOutput:

@@ -13,7 +13,7 @@ from test.fakes import FakeModel
 
 
 class MainLoopTest(unittest.TestCase):
-    """Tests for the compiled LangGraph main loop."""
+    """Tests for the event-driven agent loop."""
 
     class RepeatReadModel(BaseModelClient):
         """Fake model that repeatedly asks to read test.md."""
@@ -110,8 +110,12 @@ class MainLoopTest(unittest.TestCase):
             )
             runtime = InnoAgentRuntime(config, model=self.StreamTextModel())
             runtime.invoke("hello")
-            text_events = [event for event in runtime._run_events if event["type"] == "text.delta"]
-            self.assertEqual([event["content"] for event in text_events], ["hello", " world"])
+            text_events = [
+                event
+                for event in runtime._run_events
+                if event["type"] == "item.delta" and event.get("item_type") == "message"
+            ]
+            self.assertEqual([event["delta"] for event in text_events], ["hello", " world"])
 
 
 if __name__ == "__main__":

@@ -43,7 +43,14 @@ class FakeModel(BaseModelClient):
             if not pending:
                 return self._finish(tool_results, goal=goal)
             task = pending[0]
-            last_result = tool_results[-1] if tool_results else None
+            last_result = next(
+                (
+                    item
+                    for item in reversed(tool_results)
+                    if item.get("tool_name") not in {"plan", "task", "skill"}
+                ),
+                None,
+            )
             effective_goal = " ".join(part for part in [goal, user_input] if part)
             if (
                 last_result

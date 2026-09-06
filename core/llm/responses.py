@@ -12,6 +12,7 @@ from typing import Any, Literal
 import httpx
 
 from core.event.events import AgentEvent
+from core.prompts import SYSTEM_PROMPT
 from core.llm.base import BaseModelClient, ModelDecision, ToolCallDecision
 
 
@@ -64,9 +65,14 @@ class OpenAICompatibleModel(BaseModelClient):
         tool_schemas: list[dict[str, Any]],
         *,
         stage: str = "main",
+        state: dict[str, Any] | None = None,
     ):
         """调用 Responses API，并将响应事件转换为内部事件流。"""
         payload = self._build_payload(context, tool_schemas)
+        tool_names: dict[int, str] = {}
+        completed_calls: set[int] = set()
+        text_delta_seen = False
+        reasoning_delta_seen = False
         with httpx.stream(
             "POST",
             f"{self.base_url}/responses",
@@ -86,77 +92,129 @@ class OpenAICompatibleModel(BaseModelClient):
                 if event_type == "response.failed":
                     error = (data.get("response") or {}).get("error") or data.get("error")
                     yield AgentEvent(
-                        type="finish",
-                        is_delta=False,
+                        type="response.failed",
                         stage=stage,  # type: ignore[arg-type]
                         finish_reason=f"failed: {error}",
+                        payload={"error": error},
                     )
                     return
                 if event_type == "response.incomplete":
                     yield AgentEvent(
-                        type="finish",
-                        is_delta=False,
+                        type="response.failed",
                         stage=stage,  # type: ignore[arg-type]
                         finish_reason="length",
+                        payload={"error": "response incomplete"},
                     )
                     return
                 if event_type == "response.reasoning_text.delta":
+                    reasoning_delta_seen = True
                     yield AgentEvent(
-                        type="reasoning",
+                        type="item.delta",
                         is_delta=True,
                         stage=stage,  # type: ignore[arg-type]
+                        item_type="reasoning",
+                        delta=str(data.get("delta") or ""),
                         content=str(data.get("delta") or ""),
                     )
                 elif event_type == "response.reasoning_text.done":
                     yield AgentEvent(
-                        type="reasoning",
-                        is_delta=False,
+                        type="item.completed",
                         stage=stage,  # type: ignore[arg-type]
+                        item_type="reasoning",
+                        payload={
+                            "content": str(data.get("text") or data.get("delta") or ""),
+                            "streamed": reasoning_delta_seen,
+                        },
                         content=str(data.get("text") or data.get("delta") or ""),
                     )
                 elif event_type == "response.output_text.delta":
+                    text_delta_seen = True
                     yield AgentEvent(
-                        type="text",
+                        type="item.delta",
                         is_delta=True,
                         stage=stage,  # type: ignore[arg-type]
+                        item_type="message",
+                        delta=str(data.get("delta") or ""),
                         content=str(data.get("delta") or ""),
                     )
                 elif event_type == "response.output_text.done":
                     yield AgentEvent(
-                        type="text",
-                        is_delta=False,
+                        type="item.completed",
                         stage=stage,  # type: ignore[arg-type]
+                        item_type="message",
+                        payload={
+                            "content": str(data.get("text") or ""),
+                            "streamed": text_delta_seen,
+                        },
                         content=str(data.get("text") or ""),
                     )
                 elif event_type == "response.output_item.added":
                     item = data.get("item") or {}
                     if item.get("type") == "function_call":
+                        index = int(data.get("output_index", 0))
+                        tool_names[index] = str(item.get("name") or "")
                         yield AgentEvent(
-                            type="tool_call",
-                            is_delta=True,
+                            type="item.started",
                             stage=stage,  # type: ignore[arg-type]
+                            item_type="tool_call",
+                            call_id=str(index),
                             tool_name=str(item.get("name") or ""),
                             arguments={},
+                            payload={"name": str(item.get("name") or "")},
                         )
                 elif event_type == "response.function_call_arguments.delta":
+                    index = int(data.get("output_index", 0))
                     yield AgentEvent(
-                        type="tool_call_argument",
+                        type="item.delta",
                         is_delta=True,
                         stage=stage,  # type: ignore[arg-type]
+                        item_type="tool_call",
+                        call_id=str(index),
+                        delta=str(data.get("delta") or ""),
                         content=str(data.get("delta") or ""),
                     )
                 elif event_type == "response.function_call_arguments.done":
+                    index = int(data.get("output_index", 0))
+                    arguments_text = str(data.get("arguments") or "")
+                    try:
+                        arguments = json.loads(arguments_text) if arguments_text else {}
+                    except json.JSONDecodeError:
+                        arguments = {"_raw": arguments_text}
+                    completed_calls.add(index)
                     yield AgentEvent(
-                        type="tool_call_argument",
-                        is_delta=False,
+                        type="item.completed",
                         stage=stage,  # type: ignore[arg-type]
-                        content=str(data.get("arguments") or ""),
+                        item_type="tool_call",
+                        call_id=str(index),
+                        tool_name=tool_names.get(index, ""),
+                        arguments=arguments,
+                        payload={"name": tool_names.get(index, ""), "arguments": arguments},
                     )
+                elif event_type == "response.output_item.done":
+                    item = data.get("item") or {}
+                    index = int(data.get("output_index", 0))
+                    if item.get("type") == "function_call" and index not in completed_calls:
+                        arguments_text = str(item.get("arguments") or "")
+                        try:
+                            arguments = json.loads(arguments_text) if arguments_text else {}
+                        except json.JSONDecodeError:
+                            arguments = {"_raw": arguments_text}
+                        yield AgentEvent(
+                            type="item.completed",
+                            stage=stage,  # type: ignore[arg-type]
+                            item_type="tool_call",
+                            call_id=str(index),
+                            tool_name=str(item.get("name") or tool_names.get(index, "")),
+                            arguments=arguments,
+                            payload={
+                                "name": str(item.get("name") or tool_names.get(index, "")),
+                                "arguments": arguments,
+                            },
+                        )
                 elif event_type == "response.completed":
                     usage = (data.get("response") or {}).get("usage")
                     yield AgentEvent(
-                        type="finish",
-                        is_delta=False,
+                        type="response.completed",
                         stage=stage,  # type: ignore[arg-type]
                         finish_reason="stop",
                         usage=usage,
@@ -166,9 +224,7 @@ class OpenAICompatibleModel(BaseModelClient):
         """组装 Responses API 请求体。"""
         return {
             "model": self.model,
-            "instructions": (
-                "你是 InnoAgent。需要执行操作时直接调用对应工具；"
-            ),
+            "instructions": SYSTEM_PROMPT,
             "input": [
                 {
                     "role": "user",

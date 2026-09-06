@@ -11,6 +11,8 @@ class ReflectionResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     summary: str = ""
     feedback: str = ""
+    needs_user: bool = False
+    blocked: bool = False
     missing_conditions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
 

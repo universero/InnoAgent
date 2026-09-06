@@ -11,6 +11,11 @@ from core.tool.base import BaseTool, ToolContext, ToolResult
 from core.tool.decorators import tool
 
 
+TOOL_PROMPT = """Search file contents with a regular expression, returning paths and line numbers.
+Use a glob to narrow broad searches. Prefer this tool over shell grep for normal repository search;
+independent searches may be called in parallel."""
+
+
 class GrepInput(BaseModel):
     """Arguments accepted by the grep tool."""
     pattern: str
@@ -23,7 +28,7 @@ class GrepInput(BaseModel):
 class GrepTool(BaseTool):
     """Search file contents with ripgrep or grep."""
     name = "grep"
-    description = "搜索文件内容。内部优先使用 rg，不可用时回退到 grep。"
+    description = TOOL_PROMPT
     input_model = GrepInput
 
     def run(self, tool_input: BaseModel, context: ToolContext) -> ToolResult:

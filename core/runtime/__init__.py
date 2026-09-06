@@ -1,1 +1,1 @@
-"""Runtime graph and state for InnoAgent."""
+"""Runtime compatibility entry point, configuration, and state models."""

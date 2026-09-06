@@ -10,6 +10,10 @@ from core.tool.base import BaseTool, ToolContext, ToolResult
 from core.tool.decorators import tool
 
 
+TOOL_PROMPT = """List files and directories inside the workspace. Use recursive mode only when a
+bounded depth is useful; prefer targeted paths instead of dumping the entire repository."""
+
+
 class LsInput(BaseModel):
     """Arguments accepted by the ls tool."""
     path: str = "."
@@ -21,7 +25,7 @@ class LsInput(BaseModel):
 class LsTool(BaseTool):
     """List files and directories."""
     name = "ls"
-    description = "列出目录中的文件和子目录。"
+    description = TOOL_PROMPT
     input_model = LsInput
 
     def run(self, tool_input: BaseModel, context: ToolContext) -> ToolResult:

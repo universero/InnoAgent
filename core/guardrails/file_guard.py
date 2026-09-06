@@ -119,17 +119,36 @@ class FileConfirmationGuard(BaseGuardrail):
         """Request confirmation for writes in confirm mode."""
         if self._is_approved(tool.name, arguments, context.approved_tool_calls):
             return GuardrailDecision()
+        if self._is_approved(tool.name, arguments, context.denied_tool_calls):
+            return GuardrailDecision(
+                allowed=False,
+                status="blocked",
+                reason="operation was denied by the user",
+            )
+        if context.permission_store is not None:
+            decision = context.permission_store.decision(tool.name, arguments)
+            if decision == "deny":
+                return GuardrailDecision(
+                    allowed=False,
+                    status="blocked",
+                    reason="operation is denied by repository permission policy",
+                )
+            if decision == "allow":
+                return GuardrailDecision()
         if is_readonly(context.mode) and tool.is_write:
             return GuardrailDecision(
                 allowed=False,
                 status="blocked",
                 reason="write operation is not allowed in readonly mode",
             )
-        if should_confirm_write(context.mode, tool.is_write):
+        if should_confirm_write(
+            context.mode,
+            tool.is_write or tool.requires_confirmation,
+        ):
             return GuardrailDecision(
                 allowed=False,
                 status="needs_confirmation",
-                reason="write operation requires user confirmation in confirm mode",
+                reason="operation requires user confirmation in ask mode",
                 metadata={"arguments": arguments},
             )
         return GuardrailDecision()

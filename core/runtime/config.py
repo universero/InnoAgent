@@ -12,9 +12,14 @@ from core.guardrails.policy import RunMode, normalize_mode
 class RuntimeConfig:
     """User-configurable runtime settings."""
     workspace_root: str = "."
-    mode: str = "auto"
+    mode: str = "ask"
     max_iterations: int = 20
-    max_context_tokens: int = 4000
+    max_reflections: int = 3
+    max_context_tokens: int = 128000
+    compact_reserve_tokens: int = 16000
+    compact_keep_recent_tokens: int = 12000
+    max_tool_output_chars: int = 30000
+    max_parallel_tools: int = 4
     profile_root: str = ".innoagent/profiles"
     session_root: str = ".innoagent/sessions"
     memory_enabled: bool = True

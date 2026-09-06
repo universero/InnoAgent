@@ -1,13 +1,17 @@
-"""事件驱动的简单 ReAct Agent。"""
+"""The single event-driven ReAct runtime used by InnoAgent."""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from threading import Lock
+from typing import Any, Callable, Literal
 
+from core.agent.graph import MainAgentGraph
+from core.agent.model_stream import ModelBatch, ModelStreamConsumer
+from core.agent.stages import StageRunner
+from core.agent.subagent import SubagentRunner
+from core.config.permissions import PermissionStore
 from core.event.events import AgentEvent
 from core.llm import BaseModelClient, OpenAICompatibleModel
 from core.memory.profile import ProfileStore
@@ -15,19 +19,34 @@ from core.memory.recall import MemoryRecall
 from core.memory.thresholds import MemoryThresholds
 from core.memory.update import MemoryUpdater
 from core.runtime.config import RuntimeConfig
-from core.runtime.events import make_event
 from core.runtime.model_config import ModelConfig, ModelConfigLoader
 from core.runtime.state import AgentState, initial_state
+from core.session.compression import ContextCompactor, estimate_tokens
 from core.session.context import ContextBuilder
 from core.session.history import SessionHistory
 from core.session.store import SessionRecord, SessionStore
-from core.tool.base import ToolContext
+from core.skill.loader import SkillLoader
+from core.tool.base import ToolContext, ToolResult
 from core.tool.registry import ToolRegistry, tool_registry
 
 
+ApprovalDecision = Literal["allow_once", "allow_always", "deny"]
+_GOAL_UNSET = object()
+
+
 def _register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
-    """注册内置工具。"""
-    from core.tool import grep_tool, ls_tool, plan_tool, read_tool, task_tool, write_tool  # noqa: F401
+    """Import and register all built-in tools exactly once."""
+    from core.tool import (  # noqa: F401
+        grep_tool,
+        ls_tool,
+        plan_tool,
+        read_tool,
+        shell_tool,
+        skill_tool,
+        subagent_tool,
+        task_tool,
+        write_tool,
+    )
 
     if registry is not tool_registry:
         for item in tool_registry.list_tools():
@@ -38,7 +57,7 @@ def _register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
 
 
 class EventDrivenAgent:
-    """维护简单 ReAct 循环并驱动事件管线。"""
+    """Own the model loop, tools, permissions, context, and session events."""
 
     def __init__(
         self,
@@ -48,6 +67,7 @@ class EventDrivenAgent:
         stream_handler: Callable[[dict[str, Any]], None] | None = None,
         model_config: ModelConfig | None = None,
         model_config_loader: ModelConfigLoader | None = None,
+        summarizer: Callable[[str], str] | None = None,
     ) -> None:
         if model is None:
             raise ValueError("EventDrivenAgent requires a model client")
@@ -61,6 +81,8 @@ class EventDrivenAgent:
         )
         self.profile_store = ProfileStore(self.config.profile_root)
         self.session_store = SessionStore(self.config.session_root)
+        self.permission_store = PermissionStore(self.config.workspace_root)
+        self.skill_loader = SkillLoader(self.config.workspace_root)
         self.memory_recall = MemoryRecall(self.profile_store)
         self.memory_updater = MemoryUpdater(
             self.profile_store,
@@ -71,247 +93,766 @@ class EventDrivenAgent:
             enabled=self.config.memory_enabled,
         )
         self.context_builder = ContextBuilder(max_tokens=self.config.max_context_tokens)
-        self._run_events: list[Any] = []
+        self.compactor = ContextCompactor(self.config.compact_keep_recent_tokens)
+        self.model_stream = ModelStreamConsumer(self.model, self._emit)
+        self.stages = StageRunner(self.model, self.model_stream, self._emit)
+        self.subagents = SubagentRunner(
+            self.model_stream,
+            self.registry,
+            self.config,
+            self.permission_store,
+            self._emit,
+        )
+        self.graph = MainAgentGraph(self)
+        self.summarizer = summarizer
+        self._uses_model_summarizer = self.summarizer is None and isinstance(
+            model,
+            OpenAICompatibleModel,
+        )
+        if self._uses_model_summarizer:
+            self.summarizer = lambda prompt: self.stages.complete(prompt, stage="compact")
+        self._run_events: list[dict[str, Any]] = []
+        self._session_id: str | None = None
+        self._turn_id: str | None = None
+        self._run_active = False
+        self._steering_lock = Lock()
+        self._steering_queues: dict[str, list[dict[str, str]]] = {}
+        self._stop_requests: set[str] = set()
 
-    def _emit(self, event: AgentEvent) -> None:
-        """把 AgentEvent 写入当前事件缓冲并转发渲染层。"""
-        self._run_events.append(event)
-        if self.stream_handler:
-            self.stream_handler(event.as_event_dict())
-
-    def _emit_dict(self, event: dict[str, Any]) -> None:
-        """转发 session 级别的非模型事件。"""
-        self._run_events.append(event)
-        if self.stream_handler:
-            self.stream_handler(event)
+    def new_state(
+        self,
+        user_input: str,
+        *,
+        session_id: str | None = None,
+        goal: str | None = None,
+    ) -> tuple[AgentState, str]:
+        """Create a well-formed state without persisting a session."""
+        sid = session_id or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        profile = self.memory_recall.recall("default")
+        state = initial_state(
+            user_input=user_input,
+            session_id=sid,
+            goal=goal,
+            mode=self.config.mode,
+            max_iterations=self.config.max_iterations,
+            memory_profile=profile.model_dump(),
+        )
+        return state, sid
 
     def invoke(
         self,
         user_input: str,
         *,
         session_id: str | None = None,
-        goal: str | None = None,
+        goal: str | None | object = _GOAL_UNSET,
+        active_skills: list[dict[str, Any]] | None = None,
     ) -> AgentState:
-        """执行一个用户回合。"""
-        if session_id:
-            state = self.session_store.load_state(session_id)
-            state["user_input"] = user_input
-            state["messages"] = list(state.get("messages", [])) + [
-                {"role": "user", "content": user_input}
-            ]
-        else:
-            state, session_id = self._new_state(user_input, goal=goal)
-
-        state["turn_id"] = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        self._run_events = []
-        self._emit_dict(
-            make_event("user_input", session_id=session_id, user_input=user_input)
-        )
-        result = self._run_react(state)
-        result["session_id"] = session_id
-        self._save_session(result)
-        return result
-
-    def _new_state(self, user_input: str, goal: str | None) -> tuple[AgentState, str]:
-        session_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        profile = self.memory_recall.recall("default")
-        state = initial_state(
-            user_input=user_input,
-            session_id=session_id,
-            goal=goal,
-            mode=self.config.mode,
-            max_iterations=self.config.max_iterations,
-            memory_profile=profile.model_dump(),
-        )
-        state["messages"] = [{"role": "user", "content": user_input}]
-        self.session_store.create(
-            SessionRecord(
-                session_id=session_id,
-                user_id="default",
-                goal=goal,
-                mode=self.config.mode,
+        """Execute one user turn and persist replayable events."""
+        new_session = session_id is None
+        resolved_goal = goal if isinstance(goal, str) else None
+        if new_session:
+            state, session_id = self.new_state(user_input, goal=resolved_goal)
+            self.session_store.create(
+                SessionRecord(
+                    session_id=session_id,
+                    user_id="default",
+                    goal=resolved_goal,
+                    mode=self.config.mode,
+                )
             )
-        )
-        return state, session_id
+        else:
+            state = self.session_store.load_state(str(session_id))
+            self._ensure_state_defaults(state)
+            if goal is not _GOAL_UNSET:
+                state["goal"] = resolved_goal
+                state["goal_complete"] = False
+
+        if active_skills is not None:
+            state["active_skills"] = self._merge_skills(
+                state.get("active_skills", []),
+                active_skills,
+            )
+
+        state["user_input"] = user_input
+        state["mode"] = self.config.mode  # type: ignore[typeddict-item]
+        state["messages"] = list(state.get("messages", [])) + [
+            {"role": "user", "content": user_input}
+        ]
+        state["pending_confirmation"] = None
+        state["pending_tool_calls"] = []
+        state["finished"] = False
+        state["finish_reason"] = None
+        state["iteration"] = 0
+        state["turn_id"] = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+        self._begin_run(str(session_id), str(state["turn_id"]))
+        try:
+            self._emit(
+                AgentEvent(
+                    type="turn.started",
+                    payload={"user_input": user_input, "goal": state.get("goal")},
+                )
+            )
+            self._maybe_auto_compact(state)
+            result = self._run_react(state)
+            result["session_id"] = str(session_id)
+            self._finish_turn(result)
+            self._save_session(result)
+            self.memory_updater.register_turn(user_input, str(result.get("response", "")))
+            return result
+        finally:
+            self._end_run()
 
     def _run_react(self, state: AgentState) -> AgentState:
-        """简单 ReAct 循环：模型事件 -> 工具执行 -> 再次模型调用。"""
-        for _ in range(int(state.get("max_iterations", 20))):
-            context = self.context_builder.build(
-                user_input=str(state.get("user_input", "")),
-                history=SessionHistory.from_dicts(state.get("messages", [])),
-                profile=self.memory_recall.recall(str(state.get("user_id", "default"))),
-                tool_schemas=self.registry.tool_schemas(
-                    ToolContext(
-                        mode=self.config.normalized_mode,
-                        allowed_roots=self.config.allowed_roots,
-                        state=dict(state),
-                        approved_tool_calls=state.get("approved_tool_calls", []),
-                    )
-                ),
-                plan=state.get("plan"),
-                tasks=state.get("tasks", []),
-            )
-            tool_call = self._consume_model_events(context, state)
-            if tool_call is None:
-                break
-            if self._execute_tool(state, tool_call):
-                return state
-        return state
+        """由 LangGraph 驱动一个完整 turn。"""
+        return self.graph.invoke(state)
 
-    def _consume_model_events(self, context: str, state: AgentState) -> dict[str, Any] | None:
-        """消费模型事件流，组装一个完整工具调用。"""
-        tool_name = ""
-        arguments_text = ""
-        final_text = ""
-        for event in self.model.stream_events(
-            context,
-            self.registry.tool_schemas(
-                ToolContext(
-                    mode=self.config.normalized_mode,
-                    allowed_roots=self.config.allowed_roots,
-                    state=dict(state),
-                    approved_tool_calls=state.get("approved_tool_calls", []),
+    def _graph_main_agent(self, state: AgentState) -> tuple[AgentState, str]:
+        """执行一次模型决策，并选择工具、反思或结束节点。"""
+        if self._consume_stop_request(state, boundary="before_model"):
+            return state, "end"
+
+        iteration = int(state.get("iteration", 0)) + 1
+        state["iteration"] = iteration
+        if iteration > int(state.get("max_iterations", self.config.max_iterations)):
+            state["response"] = state.get("response") or "已达到最大执行轮数。"
+            state["finished"] = True
+            state["finish_reason"] = "iteration_limit"
+            return state, "end"
+
+        state["stage"] = "main"
+        context = self._build_context(state)
+        batch = self._call_model(context, state, stage="main")
+        self._add_usage(state, batch.usage)
+        if batch.error:
+            state["errors"] = list(state.get("errors", [])) + [
+                {"stage": "main", "error": batch.error}
+            ]
+            state["response"] = f"模型调用失败：{batch.error}"
+            state["finished"] = True
+            state["finish_reason"] = "error"
+            return state, "end"
+
+        if batch.text:
+            state["messages"] = list(state.get("messages", [])) + [
+                {"role": "assistant", "content": batch.text}
+            ]
+
+        if self._consume_stop_request(state, boundary="after_model"):
+            return state, "end"
+
+        if batch.calls:
+            if self._apply_pending_steering(state, boundary="immediate"):
+                return state, "main_agent"
+            signature = json.dumps(batch.calls, ensure_ascii=False, sort_keys=True)
+            if signature == state.get("_last_tool_signature") and state.get("tool_results"):
+                state["response"] = self._last_tool_output(state)
+                state["finished"] = True
+                state["finish_reason"] = "repeated_tool_call"
+                return state, "end"
+            state["_last_tool_signature"] = signature
+            state["tool_calls"] = batch.calls
+            return state, "tool_batch"
+
+        # 没有工具可作为纠偏边界时，在结束或反思前兜底应用用户输入。
+        if self._apply_pending_steering(state, boundary="before_finish"):
+            return state, "main_agent"
+
+        state["response"] = batch.text or self._last_tool_output(state)
+        state["streamed_response"] = batch.text
+        if not state.get("goal"):
+            state["finished"] = True
+            state["finish_reason"] = "completed"
+            return state, "end"
+        return state, "reflection"
+
+    def _graph_tool_batch(self, state: AgentState) -> tuple[AgentState, str]:
+        """执行一个工具批次；默认在整批工具完成后应用用户纠偏。"""
+        calls = list(state.get("tool_calls", []))
+        if self._execute_tool_batch(state, calls):
+            return state, "end"
+        if self._consume_stop_request(state, boundary="after_tool"):
+            return state, "end"
+        self._apply_pending_steering(state, boundary="after_tool")
+        return state, "main_agent"
+
+    def _graph_reflection(self, state: AgentState) -> tuple[AgentState, str]:
+        """评估 goal，并将未完成原因反馈给主 Agent。"""
+        state["stage"] = "reflect"
+        reflection = self.stages.reflect(state)
+        self._add_usage(state, self.stages.last_usage)
+        state["reflection"] = reflection.model_dump()
+        state["reflection_count"] = int(state.get("reflection_count", 0)) + 1
+
+        if self._consume_stop_request(state, boundary="after_reflection"):
+            return state, "end"
+        if self._apply_pending_steering(state, boundary="before_finish"):
+            return state, "main_agent"
+        if reflection.complete:
+            state["goal_complete"] = True
+            state["finished"] = True
+            state["finish_reason"] = "goal_complete"
+            return state, "end"
+        if reflection.needs_user or reflection.blocked:
+            state["response"] = reflection.feedback or reflection.summary or state["response"]
+            state["finished"] = True
+            state["finish_reason"] = "needs_user" if reflection.needs_user else "blocked"
+            self._emit(
+                AgentEvent(
+                    type="item.completed",
+                    stage="reflect",
+                    item_type="user_question" if reflection.needs_user else "message",
+                    payload={"content": state["response"]},
                 )
-            ),
-            stage="main",
-        ):
-            self._emit(event)
-            if event.type == "reasoning":
-                continue
-            if event.type == "text":
-                final_text += event.content or ""
-            elif event.type == "tool_call":
-                tool_name = event.tool_name or ""
-            elif event.type == "tool_call_argument":
-                arguments_text += event.content or ""
-            elif event.type == "finish":
-                break
-
-        if tool_name:
-            try:
-                arguments = json.loads(arguments_text) if arguments_text.strip() else {}
-            except json.JSONDecodeError:
-                arguments = {}
-            return {"name": tool_name, "arguments": arguments}
-        state["response"] = final_text
-        state["streamed_response"] = final_text
-        state["finished"] = True
-        return None
-
-    def _execute_tool(self, state: AgentState, tool_call: dict[str, Any]) -> bool:
-        """执行工具，返回是否因为需要确认而中断。"""
-        context = ToolContext(
-            mode=self.config.normalized_mode,
-            allowed_roots=self.config.allowed_roots,
-            state=dict(state),
-            approved_tool_calls=state.get("approved_tool_calls", []),
-        )
-        result = self.registry.execute_tool(
-            tool_call["name"],
-            tool_call["arguments"],
-            context,
-        )
-        event = AgentEvent(
-            type="tool_result",
-            is_delta=False,
-            stage="main",
-            tool_name=tool_call["name"],
-            arguments=tool_call["arguments"],
-            result=result.model_dump(),
-        )
-        self._emit(event)
-        state["tool_results"] = list(state.get("tool_results", [])) + [result.model_dump()]
-        state["messages"] = list(state.get("messages", [])) + [
-            {"role": "tool", "content": result.output or result.status}
-        ]
-        if result.status == "needs_confirmation":
-            state["pending_confirmation"] = result.model_dump()
-            permission_event = AgentEvent(
-                type="permission_confirm",
-                is_delta=False,
-                stage="main",
-                tool_name=tool_call["name"],
-                arguments=tool_call["arguments"],
-                content=result.output,
-                result=result.model_dump(),
             )
-            self._emit(permission_event)
+            return state, "end"
+        if int(state["reflection_count"]) >= self.config.max_reflections:
+            state["response"] = reflection.feedback or "目标尚未完成，已达到反思重试上限。"
+            state["finished"] = True
+            state["finish_reason"] = "reflection_limit"
+            return state, "end"
+
+        feedback = reflection.feedback or "继续验证目标并补齐缺失条件。"
+        state["messages"] = list(state.get("messages", [])) + [
+            {"role": "reflection", "content": feedback}
+        ]
+        return state, "main_agent"
+
+    def _call_model(
+        self,
+        context: str,
+        state: dict[str, Any],
+        *,
+        stage: str,
+        tool_schemas: list[dict[str, Any]] | None = None,
+    ) -> ModelBatch:
+        """Call the model through the shared stream consumer."""
+        schemas = tool_schemas if tool_schemas is not None else self.registry.tool_schemas(
+            self._tool_context(state)
+        )
+        return self.model_stream.call(
+            context,
+            state,
+            stage=stage,
+            tool_schemas=schemas,
+        )
+
+    def _execute_tool_batch(self, state: AgentState, calls: list[dict[str, Any]]) -> bool:
+        """Execute a model tool batch and return whether approval paused the turn."""
+        state["tool_calls"] = calls
+        # Registry 只并行无副作用调用，并按原始 call 顺序返回结果。
+        results = self.registry.execute_many(
+            calls,
+            lambda: self._tool_context(state),
+            max_workers=self.config.max_parallel_tools,
+        )
+        pending: list[dict[str, Any]] = []
+        for call, result in zip(calls, results):
+            self._emit_tool_result(call, result, stage=str(state.get("stage", "main")))
+            if result.status == "needs_confirmation":
+                pending.append(call)
+                continue
+            self._apply_tool_result(state, call, result)
+
+        state["approved_tool_calls"] = []
+        if pending:
+            # 审批是可恢复的暂停点：先保存 pending calls，再由下一次输入续跑。
+            state["pending_tool_calls"] = pending
+            first = pending[0]
+            state["pending_confirmation"] = {
+                "tool_name": first["name"],
+                "arguments": first.get("arguments") or {},
+                "calls": pending,
+                "options": ["allow_once", "allow_always", "deny"],
+            }
+            self._emit(
+                AgentEvent(
+                    type="approval.requested",
+                    item_type="approval",
+                    call_id=str(first.get("call_id") or ""),
+                    tool_name=str(first["name"]),
+                    arguments=dict(first.get("arguments") or {}),
+                    payload=dict(state["pending_confirmation"]),
+                    options=["allow_once", "allow_always", "deny"],
+                )
+            )
+            state["finish_reason"] = "approval_required"
             return True
         return False
 
-    def _save_session(self, state: AgentState) -> None:
-        """只落盘完整事件，不落盘 delta。"""
-        session_id = str(state["session_id"])
-        events: list[dict[str, Any]] = []
-        for item in self._run_events:
-            if isinstance(item, AgentEvent):
-                if item.is_delta:
-                    continue
-                events.append(item.as_event_dict())
+    def _apply_tool_result(
+        self,
+        state: AgentState,
+        call: dict[str, Any],
+        result: ToolResult,
+    ) -> None:
+        dumped = result.model_dump()
+        state["tool_results"] = list(state.get("tool_results", [])) + [dumped]
+        state["messages"] = list(state.get("messages", [])) + [
+            {"role": "tool", "content": result.to_message()}
+        ]
+        if result.status in {"error", "blocked"}:
+            state["errors"] = list(state.get("errors", [])) + [
+                {"tool": call.get("name"), "error": result.output}
+            ]
+        data = result.data if isinstance(result.data, dict) else {}
+        if data.get("plan") is not None:
+            state["plan"] = data["plan"]
+            state["tasks"] = data.get("tasks", [])
+        active_skill = data.get("active_skill")
+        if isinstance(active_skill, dict):
+            skills = [
+                skill
+                for skill in state.get("active_skills", [])
+                if skill.get("name") != active_skill.get("name")
+            ]
+            skills.append(active_skill)
+            state["active_skills"] = skills
+        if isinstance(data.get("usage"), dict):
+            self._add_usage(state, data["usage"])
+
+    def resolve_approval(self, session_id: str, decision: ApprovalDecision) -> AgentState:
+        """Resolve pending calls, optionally persist rules, then continue the loop."""
+        state = self.session_store.load_state(session_id)
+        self._ensure_state_defaults(state)
+        pending = list(state.get("pending_tool_calls") or [])
+        if not pending:
+            raise ValueError("session has no pending approval")
+        state["turn_id"] = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        self._begin_run(session_id, str(state["turn_id"]))
+        try:
+            self._emit(
+                AgentEvent(
+                    type="approval.resolved",
+                    item_type="approval",
+                    payload={"decision": decision, "calls": pending},
+                )
+            )
+            state["pending_tool_calls"] = []
+            state["pending_confirmation"] = None
+            state["tool_results"] = [
+                result
+                for result in state.get("tool_results", [])
+                if result.get("status") != "needs_confirmation"
+            ]
+
+            if decision == "deny":
+                state["denied_tool_calls"] = list(state.get("denied_tool_calls", [])) + pending
+                for call in pending:
+                    result = ToolResult(
+                        tool_name=str(call["name"]),
+                        status="blocked",
+                        output="operation denied by user",
+                    )
+                    self._emit_tool_result(call, result)
+                    self._apply_tool_result(state, call, result)
             else:
-                events.append(item)
-        self._emit_dict(make_event("finish", session_id=session_id))
-        events.append({"type": "finish", "session_id": session_id})
-        self.session_store.append_events(session_id, events)
+                if decision == "allow_always":
+                    # 持久授权只写入仓库级规则，仍受路径和只读模式约束。
+                    for call in pending:
+                        self.permission_store.allow(
+                            str(call["name"]), dict(call.get("arguments") or {})
+                        )
+                else:
+                    state["approved_tool_calls"] = pending
+                self._execute_tool_batch(state, pending)
+
+            if self._consume_stop_request(state, boundary="after_tool"):
+                self._finish_turn(state)
+                self._save_session(state)
+                return state
+            self._apply_pending_steering(state, boundary="after_tool")
+
+            result = self._run_react(state)
+            self._finish_turn(result)
+            self._save_session(result)
+            return result
+        finally:
+            self._end_run()
+
+    def approve_pending(self, session_id: str) -> AgentState:
+        """Compatibility helper for one-time approval."""
+        return self.resolve_approval(session_id, "allow_once")
+
+    def deny_pending(self, session_id: str) -> AgentState:
+        return self.resolve_approval(session_id, "deny")
+
+    def compact(self, session_id: str, focus: str | None = None) -> AgentState:
+        """Manually compact one persisted session."""
+        state = self.session_store.load_state(session_id)
+        self._ensure_state_defaults(state)
+        state["turn_id"] = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        self._begin_run(session_id, str(state["turn_id"]))
+        try:
+            self._compact_state(state, trigger="manual", focus=focus)
+            self._save_session(state)
+            return state
+        finally:
+            self._end_run()
+
+    def _maybe_auto_compact(self, state: AgentState) -> None:
+        messages = SessionHistory.from_dicts(state.get("messages", [])).messages
+        tokens = sum(estimate_tokens(message.content) for message in messages)
+        reserve = min(self.config.compact_reserve_tokens, self.config.max_context_tokens // 4)
+        if tokens > self.config.max_context_tokens - reserve:
+            self._compact_state(state, trigger="auto")
+
+    def _compact_state(
+        self,
+        state: AgentState,
+        *,
+        trigger: str,
+        focus: str | None = None,
+    ) -> None:
+        messages = SessionHistory.from_dicts(state.get("messages", [])).messages
+        self._emit(
+            AgentEvent(
+                type="context.compaction.started",
+                stage="compact",
+                item_type="compaction",
+                payload={"trigger": trigger},
+            )
+        )
+        result = self.compactor.compact(messages, self.summarizer, focus=focus)
+        if self._uses_model_summarizer:
+            self._add_usage(state, self.stages.last_usage)
+        state["messages"] = [message.as_dict() for message in result.messages]
+        state["context_summary"] = result.summary
+        self._emit(
+            AgentEvent(
+                type="context.compaction.completed",
+                stage="compact",
+                item_type="compaction",
+                payload={
+                    "trigger": trigger,
+                    "summary": result.summary,
+                    "tokens_before": result.tokens_before,
+                    "tokens_after": result.tokens_after,
+                    "compression_ratio": result.compression_ratio,
+                },
+                progress=1.0,
+            )
+        )
+
+    def _build_context(self, state: AgentState) -> str:
+        context = self.context_builder.build(
+            user_input=str(state.get("user_input", "")),
+            history=SessionHistory.from_dicts(state.get("messages", [])),
+            profile=self.memory_recall.recall(str(state.get("user_id", "default"))),
+            tool_schemas=self.registry.tool_schemas(self._tool_context(state)),
+            plan=state.get("plan"),
+            tasks=state.get("tasks", []),
+            reflection_feedback=self._latest_reflection_feedback(state),
+            context_summary=str(state.get("context_summary") or ""),
+            skill_index=self.skill_loader.prompt_index(),
+            active_skills=state.get("active_skills", []),
+        )
+        state["context"] = context
+        state["context_usage"] = dict(self.context_builder.last_usage)
+        return context
+
+    def _tool_context(self, state: dict[str, Any]) -> ToolContext:
+        return ToolContext(
+            mode=self.config.normalized_mode,
+            allowed_roots=self.config.allowed_roots,
+            state=dict(state),
+            approved_tool_calls=list(state.get("approved_tool_calls", [])),
+            denied_tool_calls=list(state.get("denied_tool_calls", [])),
+            permission_store=self.permission_store,
+            services={
+                "plan_runner": self.stages.run_plan,
+                "subagent_runner": self.subagents.run,
+                "skill_loader": self.skill_loader,
+                "max_tool_output_chars": self.config.max_tool_output_chars,
+            },
+        )
+
+    def _emit_tool_result(
+        self,
+        call: dict[str, Any],
+        result: ToolResult,
+        *,
+        stage: str = "main",
+    ) -> None:
+        self._emit(
+            AgentEvent(
+                type="item.completed",
+                stage=stage,  # type: ignore[arg-type]
+                item_type="tool_result",
+                call_id=str(call.get("call_id") or ""),
+                tool_name=str(call.get("name") or ""),
+                arguments=dict(call.get("arguments") or {}),
+                result=result.model_dump(),
+                payload={"result": result.model_dump()},
+            )
+        )
+
+    def _emit(self, event: AgentEvent | dict[str, Any]) -> None:
+        if isinstance(event, AgentEvent):
+            if event.session_id is None:
+                event.session_id = self._session_id
+            if event.turn_id is None:
+                event.turn_id = self._turn_id
+            data = event.as_event_dict()
+        else:
+            data = dict(event)
+            data.setdefault("session_id", self._session_id)
+            data.setdefault("turn_id", self._turn_id)
+        self._run_events.append(data)
+        if self.stream_handler:
+            self.stream_handler(data)
+
+    def _begin_run(self, session_id: str, turn_id: str) -> None:
+        with self._steering_lock:
+            self._session_id = session_id
+            self._turn_id = turn_id
+            self._run_active = True
+        self._run_events = []
+
+    def _end_run(self) -> None:
+        with self._steering_lock:
+            self._run_active = False
+
+    def submit_steering(
+        self,
+        content: str,
+        *,
+        session_id: str | None = None,
+        delivery: Literal["after_tool", "immediate"] = "after_tool",
+    ) -> bool:
+        """提交执行中纠偏；默认等下一批工具完成后再交给模型。"""
+        message = content.strip()
+        with self._steering_lock:
+            if not self._run_active:
+                return False
+            target = session_id or self._session_id
+            if session_id is not None and session_id != self._session_id:
+                return False
+        if not message or not target:
+            return False
+        with self._steering_lock:
+            self._steering_queues.setdefault(target, []).append(
+                {"content": message, "delivery": delivery}
+            )
+        self._emit(
+            AgentEvent(
+                type="steering.queued",
+                item_type="user_message",
+                payload={"content": message, "delivery": delivery},
+            )
+        )
+        return True
+
+    def request_stop(self, *, session_id: str | None = None) -> bool:
+        """请求在当前模型或工具安全边界停止执行。"""
+        with self._steering_lock:
+            if not self._run_active:
+                return False
+            target = session_id or self._session_id
+            if session_id is not None and session_id != self._session_id:
+                return False
+        if not target:
+            return False
+        with self._steering_lock:
+            self._stop_requests.add(target)
+        self._emit(
+            AgentEvent(
+                type="steering.stop_requested",
+                item_type="user_message",
+                payload={"session_id": target},
+            )
+        )
+        return True
+
+    def _apply_pending_steering(self, state: AgentState, *, boundary: str) -> bool:
+        """在 LangGraph 节点边界将排队的用户纠偏写入消息历史。"""
+        session_id = str(state.get("session_id") or self._session_id or "")
+        if not session_id:
+            return False
+        with self._steering_lock:
+            queued = self._steering_queues.get(session_id, [])
+            if boundary == "immediate":
+                selected = [item for item in queued if item["delivery"] == "immediate"]
+            else:
+                selected = list(queued)
+            if not selected:
+                return False
+            selected_ids = {id(item) for item in selected}
+            remaining = [item for item in queued if id(item) not in selected_ids]
+            if remaining:
+                self._steering_queues[session_id] = remaining
+            else:
+                self._steering_queues.pop(session_id, None)
+
+        additions = [
+            {"role": "user", "content": f"执行中用户纠偏：{item['content']}"}
+            for item in selected
+        ]
+        state["messages"] = list(state.get("messages", [])) + additions
+        state["steering_history"] = list(state.get("steering_history", [])) + [
+            {
+                "content": item["content"],
+                "delivery": item["delivery"],
+                "applied_at": boundary,
+            }
+            for item in selected
+        ]
+        # 用户改变方向后，允许模型重新选择与上一轮相同的工具。
+        state["_last_tool_signature"] = ""
+        for item in selected:
+            self._emit(
+                AgentEvent(
+                    type="steering.applied",
+                    item_type="user_message",
+                    payload={
+                        "content": item["content"],
+                        "delivery": item["delivery"],
+                        "boundary": boundary,
+                    },
+                )
+            )
+        return True
+
+    def _consume_stop_request(self, state: AgentState, *, boundary: str) -> bool:
+        session_id = str(state.get("session_id") or self._session_id or "")
+        with self._steering_lock:
+            requested = session_id in self._stop_requests
+            self._stop_requests.discard(session_id)
+        if not requested:
+            return False
+        state["response"] = "已根据用户请求停止当前执行。"
+        state["finished"] = True
+        state["finish_reason"] = "user_stopped"
+        self._emit(
+            AgentEvent(
+                type="steering.stopped",
+                item_type="user_message",
+                payload={"boundary": boundary},
+            )
+        )
+        return True
+
+    def _finish_turn(self, state: AgentState) -> None:
+        event_type = "turn.failed" if state.get("finish_reason") == "error" else "turn.completed"
+        self._emit(
+            AgentEvent(
+                type=event_type,
+                payload={
+                    "finish_reason": state.get("finish_reason") or "completed",
+                    "goal_complete": bool(state.get("goal_complete")),
+                    "usage": state.get("usage", {}),
+                    "context_usage": state.get("context_usage", {}),
+                },
+                usage=state.get("usage"),
+            )
+        )
+
+    def _save_session(self, state: AgentState) -> None:
+        session_id = str(state["session_id"])
+        persistent = [event for event in self._run_events if event.get("type") != "item.delta"]
+        checkpoint = dict(state)
+        checkpoint.pop("_last_tool_signature", None)
+        persistent.append(
+            {
+                "type": "state.checkpoint",
+                "session_id": session_id,
+                "turn_id": state.get("turn_id"),
+                "timestamp": datetime.now().astimezone().isoformat(),
+                "state": checkpoint,
+            }
+        )
+        self.session_store.append_events(session_id, persistent)
+
+    def _ensure_state_defaults(self, state: dict[str, Any]) -> None:
+        defaults = initial_state(
+            user_input=str(state.get("user_input", "")),
+            session_id=str(state.get("session_id", "default")),
+            goal=state.get("goal"),
+            mode=str(state.get("mode", self.config.mode)),
+            max_iterations=int(state.get("max_iterations", self.config.max_iterations)),
+        )
+        for key, value in defaults.items():
+            state.setdefault(key, value)
+
+    def _add_usage(self, state: AgentState, usage: dict[str, int]) -> None:
+        current = dict(state.get("usage") or {})
+        input_tokens = int(usage.get("input_tokens", 0))
+        output_tokens = int(usage.get("output_tokens", 0))
+        current["input_tokens"] = int(current.get("input_tokens", 0)) + input_tokens
+        current["output_tokens"] = int(current.get("output_tokens", 0)) + output_tokens
+        current["reasoning_tokens"] = int(current.get("reasoning_tokens", 0)) + int(
+            usage.get("reasoning_tokens", 0)
+        )
+        current["total_tokens"] = int(current.get("total_tokens", 0)) + int(
+            usage.get("total_tokens", input_tokens + output_tokens)
+        )
+        state["usage"] = current
+
+    @staticmethod
+    def _merge_skills(
+        existing: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged = {str(skill.get("name")): skill for skill in existing if skill.get("name")}
+        for skill in selected:
+            if skill.get("name"):
+                merged[str(skill["name"])] = skill
+        return list(merged.values())
+
+    @staticmethod
+    def _last_tool_output(state: dict[str, Any]) -> str:
+        for result in reversed(state.get("tool_results", [])):
+            if result.get("output"):
+                return str(result["output"])
+        return ""
+
+    @staticmethod
+    def _latest_reflection_feedback(state: dict[str, Any]) -> str | None:
+        reflection = state.get("reflection") or {}
+        return str(reflection.get("feedback") or "") or None
 
     def set_mode(self, mode: str) -> None:
         self.config.mode = mode
 
-    def update_model(self, model_name: str, reasoning_effort: str | None = None) -> OpenAICompatibleModel:
+    def update_model(
+        self,
+        model_name: str,
+        reasoning_effort: str | None = None,
+    ) -> OpenAICompatibleModel:
         if not isinstance(self.model, OpenAICompatibleModel):
             raise TypeError("当前模型客户端不支持动态更新")
         effort = reasoning_effort or self.model.reasoning_effort or "none"
-        if effort not in {"none", "low", "high", "max"}:
-            raise ValueError("reasoning_effort 必须是 none、low、high 或 max")
-        new_model = OpenAICompatibleModel(
+        if effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("reasoning_effort 必须是 none、low、medium、high、xhigh 或 max")
+        self.model = OpenAICompatibleModel(
             api_key=self.model.api_key,
             base_url=self.model.base_url,
             model=model_name,
             reasoning_effort=effort,
         )
-        self.model = new_model
+        self.model_stream.model = self.model
+        self.stages.model = self.model
         if self.model_config:
             self.model_config.model = model_name
             self.model_config.reasoning_effort = effort
             self.model_config_loader.save(self.model_config)
-        return new_model
+        return self.model
+
+    def activate_skill(self, name: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        skill = self.skill_loader.load(name).model_dump()
+        if state is not None:
+            values = [item for item in state.get("active_skills", []) if item.get("name") != name]
+            values.append(skill)
+            state["active_skills"] = values
+        return skill
 
     def resume(self, session_id: str) -> AgentState:
-        return self.session_store.load_state(session_id)
-
-    def approve_pending(self, session_id: str) -> AgentState:
         state = self.session_store.load_state(session_id)
-        pending = state.get("pending_confirmation") or {}
-        call = {
-            "name": pending.get("tool_name"),
-            "arguments": (pending.get("metadata") or {}).get("arguments", {}),
-        }
-        self._record_permission(call)
-        state["approved_tool_calls"] = [call]
-        state["pending_confirmation"] = None
-        state["messages"] = list(state.get("messages", [])) + [
-            {"role": "user", "content": "用户已确认，继续执行之前请求的操作。"}
-        ]
-        return self._run_react(state)
+        self._ensure_state_defaults(state)
+        return state  # type: ignore[return-value]
 
-    def _record_permission(self, call: dict[str, Any]) -> None:
-        """把已批准的权限确认写入当前项目配置。"""
-        permission_path = Path(self.config.workspace_root) / ".innoagent" / "permissions.json"
-        permission_path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if permission_path.exists():
-            try:
-                data = json.loads(permission_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                data = {}
-        approved = data.setdefault("approved", [])
-        if call not in approved:
-            approved.append(call)
-        permission_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    def continue_session(self, session_id: str, user_input: str) -> AgentState:
+        return self.invoke(user_input, session_id=session_id)
 
     def rename_session(self, session_id: str, name: str) -> SessionRecord:
         return self.session_store.rename(session_id, name)

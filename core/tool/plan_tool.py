@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from core.planning.graph import planning_graph
+from core.planning.planner import PlanningService
+from core.planning.schemas import PlanningRequest
 from core.tool.base import BaseTool, ToolContext, ToolResult
 from core.tool.decorators import tool
+
+
+TOOL_PROMPT = """Enter the planning stage to create or revise an inspectable plan for a multi-step
+goal. Use it when sequencing, dependencies, or progress tracking add value. Do not use it for a
+single obvious action. Reflection feedback can be supplied when revising the plan."""
 
 
 class PlanInput(BaseModel):
@@ -19,8 +25,9 @@ class PlanInput(BaseModel):
 class PlanTool(BaseTool):
     """Expose plan creation and revision as a tool."""
     name = "plan"
-    description = "创建或修改计划。调用后会更新当前计划与任务进度。"
+    description = TOOL_PROMPT
     input_model = PlanInput
+    parallel_safe = False
 
     def dynamic_description(self, context: ToolContext | None = None) -> str:
         """Include current plan state in the model-facing description."""
@@ -35,20 +42,43 @@ class PlanTool(BaseTool):
         )
 
     def run(self, tool_input: BaseModel, context: ToolContext) -> ToolResult:
-        """Create or update the active plan through the planning subgraph."""
+        """Create or update the active plan through the configured planner."""
         args = tool_input.model_dump()
-        payload = {
-            "goal": args["goal"],
-            "feedback": args.get("feedback"),
-            "existing_plan": context.state.get("plan"),
-        }
-        output = planning_graph.invoke(payload)
+        runner = context.services.get("plan_runner")
+        if runner is not None:
+            output = runner(
+                args["goal"],
+                args.get("feedback"),
+                context.state.get("plan"),
+            )
+            return ToolResult(
+                tool_name=self.name,
+                status="success",
+                output=output.get("message", "计划已更新"),
+                data={
+                    "plan": output.get("plan"),
+                    "tasks": output.get("tasks", []),
+                    "usage": output.get("usage", {}),
+                },
+                warnings=output.get("warnings", []),
+            )
+        request = PlanningRequest(
+            goal=args["goal"],
+            feedback=args.get("feedback"),
+            existing_plan=context.state.get("plan"),
+        )
+        service = PlanningService()
+        output = (
+            service.update_plan(request)
+            if request.existing_plan is not None
+            else service.create_plan(request)
+        )
         return ToolResult(
             tool_name=self.name,
             status="success",
-            output=output.get("message", "计划已更新"),
+            output=output.message or "计划已更新",
             data={
-                "plan": output.get("plan"),
-                "tasks": output.get("tasks", []),
+                "plan": output.plan.model_dump(mode="json"),
+                "tasks": [task.model_dump(mode="json") for task in output.tasks],
             },
         )

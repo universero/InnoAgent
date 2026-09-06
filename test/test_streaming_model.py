@@ -69,6 +69,22 @@ class StreamingModelTest(unittest.TestCase):
         self.assertEqual(decision.tool_calls[0].name, "write")
         self.assertEqual(decision.tool_calls[0].arguments["path"], "a.txt")
 
+    def test_event_stream_preserves_multiple_tool_calls_and_usage(self) -> None:
+        lines = [
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"read"}}',
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"path\\":\\"a.txt\\"}"}',
+            'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","name":"ls"}}',
+            'data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\\"path\\":\\".\\"}"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}',
+        ]
+        with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            events = list(model.stream_events("inspect", []))
+        calls = [event for event in events if event.type == "item.completed" and event.item_type == "tool_call"]
+        self.assertEqual([event.tool_name for event in calls], ["read", "ls"])
+        self.assertEqual(calls[0].arguments, {"path": "a.txt"})
+        self.assertEqual(events[-1].usage["total_tokens"], 14)
+
     def test_json_content_is_parsed_and_not_streamed_as_raw_text(self) -> None:
         """Verify JSON content is parsed instead of printed."""
         json_payload = json.dumps(

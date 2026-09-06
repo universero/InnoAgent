@@ -10,6 +10,7 @@ from pathlib import Path
 
 from core.runtime.agent import InnoAgentRuntime
 from core.runtime.config import RuntimeConfig
+from core.session.store import SessionRecord, SessionStore
 from test.fakes import FakeModel
 
 
@@ -63,8 +64,49 @@ class SessionTest(unittest.TestCase):
             self.assertTrue(events)
             self.assertTrue(all(isinstance(event, dict) and "type" in event for event in events))
             self.assertEqual(events[0]["type"], "session_meta")
-            self.assertTrue(any(event["type"] == "tool" for event in events))
-            self.assertTrue(any(event["type"] == "finish" for event in events))
+            self.assertTrue(
+                any(
+                    event["type"] == "item.completed"
+                    and event.get("item_type") == "tool_result"
+                    for event in events
+                )
+            )
+            self.assertTrue(any(event["type"] == "turn.completed" for event in events))
+            self.assertFalse(any(event["type"] == "item.delta" for event in events))
+
+    def test_event_only_replay_restores_applied_steering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="steering-replay"))
+            store.append_events(
+                "steering-replay",
+                [
+                    {
+                        "type": "steering.applied",
+                        "payload": {
+                            "content": "改为只读分析",
+                            "delivery": "after_tool",
+                            "boundary": "after_tool",
+                        },
+                    }
+                ],
+            )
+
+            state = store.load_state("steering-replay")
+            self.assertEqual(
+                state["steering_history"],
+                [
+                    {
+                        "content": "改为只读分析",
+                        "delivery": "after_tool",
+                        "applied_at": "after_tool",
+                    }
+                ],
+            )
+            self.assertEqual(
+                state["messages"][-1],
+                {"role": "user", "content": "执行中用户纠偏：改为只读分析"},
+            )
 
 
 if __name__ == "__main__":

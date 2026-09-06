@@ -1,34 +1,28 @@
-"""LangGraph state definition.
-
-``tool_results``, ``messages`` and ``errors`` use additive reducers so they
-accumulate across nodes.  Scalar fields such as ``next_action`` and
-``response`` are replaced by the latest node that writes them.
-"""
+"""State shared by the event-driven agent runtime and session store."""
 
 from __future__ import annotations
 
-import operator
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 NextAction = Literal["continue", "tool_use", "planning", "reflection", "finish", "end"]
 
 
 class AgentState(TypedDict, total=False):
-    """Complete state passed through the LangGraph main loop."""
+    """Complete resumable state for one agent session."""
     session_id: str
     turn_id: str
     user_id: str
     user_input: str
     context: str
-    messages: Annotated[list[dict[str, Any]], operator.add]
+    messages: list[dict[str, Any]]
 
     next_action: NextAction
     finished: bool
     response: str
     streamed_response: str
     tool_calls: list[dict[str, Any]]
-    tool_results: Annotated[list[dict[str, Any]], operator.add]
+    tool_results: list[dict[str, Any]]
 
     goal: str | None
     goal_complete: bool
@@ -41,12 +35,23 @@ class AgentState(TypedDict, total=False):
 
     memory_profile: dict[str, Any]
     memory_updated: bool
-    mode: Literal["auto", "confirm", "readonly"]
+    mode: Literal["auto", "ask", "confirm", "readonly"]
     approved_tool_calls: list[dict[str, Any]]
+    denied_tool_calls: list[dict[str, Any]]
+    pending_tool_calls: list[dict[str, Any]]
+
+    active_skills: list[dict[str, Any]]
+    steering_history: list[dict[str, Any]]
+    context_summary: str
+    context_usage: dict[str, Any]
+    usage: dict[str, int]
+    stage: str
+    finish_reason: str | None
+    _last_tool_signature: str
 
     iteration: int
     max_iterations: int
-    errors: Annotated[list[dict[str, Any]], operator.add]
+    errors: list[dict[str, Any]]
     pending_confirmation: dict[str, Any] | None
 
 
@@ -84,6 +89,16 @@ def initial_state(
         memory_updated=False,
         mode=mode,  # type: ignore[arg-type]
         approved_tool_calls=[],
+        denied_tool_calls=[],
+        pending_tool_calls=[],
+        active_skills=[],
+        steering_history=[],
+        context_summary="",
+        context_usage={},
+        usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        stage="main",
+        finish_reason=None,
+        _last_tool_signature="",
         iteration=0,
         max_iterations=max_iterations,
         errors=[],

@@ -60,6 +60,15 @@ class ToolRegistryTest(unittest.TestCase):
             self.assertEqual(result.status, "success")
             self.assertIn("hello", result.output)
 
+    def test_unknown_tool_returns_model_visible_error(self) -> None:
+        registry = ToolRegistry()
+        results = registry.execute_many(
+            [{"name": "missing", "arguments": {}}],
+            lambda: ToolContext(mode="auto"),
+        )
+        self.assertEqual(results[0].status, "error")
+        self.assertIn("unknown tool", results[0].output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ def evaluate_goal(input_data: ReflectionInput) -> ReflectionResult:
     This is a conservative evaluator.  It considers a goal complete only when
     the model finished, no recent errors remain, all known tasks are done, and
     the response is not empty.  A production deployment can replace this
-    function with a model-backed evaluator without changing the subgraph.
+    function with a model-backed evaluator without changing the runtime contract.
     """
     missing: list[str] = []
     evidence: list[str] = []

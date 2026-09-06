@@ -63,10 +63,13 @@ class EmptyInput(BaseModel):
 class ToolContext:
     """Execution context available to a tool and guardrails."""
 
-    mode: Literal["auto", "confirm", "readonly"] = "auto"
+    mode: Literal["auto", "ask", "confirm", "readonly"] = "ask"
     allowed_roots: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     approved_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    denied_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    permission_store: Any = None
+    services: dict[str, Any] = field(default_factory=dict)
 
     def resolve_path(self, path: str) -> Path:
         """Resolve relative paths against the first allowed workspace root."""
@@ -86,6 +89,7 @@ class BaseTool(ABC):
     # Tool policy hints consumed by guardrails.
     is_write: ClassVar[bool] = False
     requires_confirmation: ClassVar[bool] = False
+    parallel_safe: ClassVar[bool] = True
 
     def dynamic_description(self, context: ToolContext | None = None) -> str:
         """Return the description shown to the model for this invocation.

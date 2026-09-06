@@ -6,6 +6,8 @@ import unittest
 
 from core.planning.planner import PlanningService
 from core.planning.schemas import PlanningRequest, PlanStep
+from core.tool.base import ToolContext
+from core.tool.plan_tool import PlanInput, PlanTool
 
 
 class PlanningTest(unittest.TestCase):
@@ -36,6 +38,16 @@ class PlanningTest(unittest.TestCase):
         ]
         with self.assertRaises(ValueError):
             service._validate(plan)
+
+    def test_plan_tool_falls_back_to_planning_service(self) -> None:
+        """Verify the tool remains usable without a model-backed plan runner."""
+        result = PlanTool().run(
+            PlanInput(goal="create a file"),
+            ToolContext(state={}),
+        )
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.data["plan"]["goal"], "create a file")
+        self.assertGreaterEqual(len(result.data["tasks"]), 1)
 
 
 if __name__ == "__main__":

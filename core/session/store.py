@@ -1,8 +1,9 @@
 """JSONL-backed session store.
 
 Each session is stored as one ``.jsonl`` file.  Every line is a complete event
-object, so a conversation can be replayed by reading lines in order.  The final
-``state_snapshot`` event carries enough state to resume the session.
+object, so a conversation can be replayed by reading lines in order. The final
+``state.checkpoint`` event currently acts as a resumable cache while event-only
+reconstruction remains available as a fallback.
 """
 
 from __future__ import annotations
@@ -99,6 +100,7 @@ class SessionStore:
         events = self.load_events(session_id)
         meta: dict[str, Any] | None = None
         name: str | None = None
+        checkpoint: dict[str, Any] | None = None
         updated_at = datetime.now(timezone.utc)
         for event in events:
             event_type = event.get("type")
@@ -107,6 +109,9 @@ class SessionStore:
                 name = event.get("name")
             elif event_type == "session_rename":
                 name = event.get("name")
+            elif event_type == "state.checkpoint" and isinstance(event.get("state"), dict):
+                # checkpoint 只用于快速恢复；缺失时仍可从稳定事件重建。
+                checkpoint = event["state"]
             if event.get("timestamp"):
                 updated_at = _parse_time(event.get("timestamp"))
         if meta is None:
@@ -117,9 +122,9 @@ class SessionStore:
             name=name,
             created_at=_parse_time(meta.get("created_at")),
             updated_at=updated_at,
-            goal=meta.get("goal"),
-            mode=str(meta.get("mode", "auto")),
-            state=_reconstruct_state(events, meta),
+            goal=(checkpoint or {}).get("goal", meta.get("goal")),
+            mode=str((checkpoint or {}).get("mode", meta.get("mode", "ask"))),
+            state=checkpoint or _reconstruct_state(events, meta),
         )
 
     def load_state(self, session_id: str) -> dict[str, Any]:
@@ -193,12 +198,79 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
         "max_iterations": 20,
         "errors": [],
         "pending_confirmation": None,
+        "pending_tool_calls": [],
+        "denied_tool_calls": [],
+        "active_skills": [],
+        "steering_history": [],
+        "context_summary": "",
+        "context_usage": {},
+        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "stage": "main",
+        "finish_reason": None,
+        "_last_tool_signature": "",
     }
 
     assistant_text = ""
     for event in events:
         event_type = event.get("type")
-        if event_type == "user_input":
+        if event_type == "turn.started":
+            payload = event.get("payload") or {}
+            content = str(payload.get("user_input") or "")
+            state["user_input"] = content
+            if content:
+                state["messages"].append({"role": "user", "content": content})
+            if payload.get("goal") is not None:
+                state["goal"] = payload.get("goal")
+            state["finished"] = False
+        elif event_type == "item.completed":
+            item_type = event.get("item_type")
+            payload = event.get("payload") or {}
+            if item_type == "message":
+                content = str(payload.get("content") or event.get("content") or "")
+                if content:
+                    state["messages"].append({"role": "assistant", "content": content})
+                    state["response"] = content
+            elif item_type == "tool_result":
+                result = payload.get("result") or event.get("result") or {}
+                state["tool_results"].append(result)
+                state["messages"].append(
+                    {"role": "tool", "content": str(result.get("output") or result.get("status") or "")}
+                )
+            elif item_type == "plan":
+                state["plan"] = payload.get("plan")
+                state["tasks"] = payload.get("tasks") or []
+            elif item_type == "reflection":
+                state["reflection"] = payload
+                state["goal_complete"] = bool(payload.get("complete"))
+        elif event_type == "approval.requested":
+            payload = event.get("payload") or {}
+            state["pending_tool_calls"] = payload.get("calls") or []
+            state["pending_confirmation"] = payload
+        elif event_type == "context.compaction.completed":
+            payload = event.get("payload") or {}
+            state["context_summary"] = str(payload.get("summary") or "")
+        elif event_type == "steering.applied":
+            payload = event.get("payload") or {}
+            content = str(payload.get("content") or "")
+            if content:
+                # 无 checkpoint 恢复时也要保留纠偏的语义和审计记录。
+                state["messages"].append(
+                    {"role": "user", "content": f"执行中用户纠偏：{content}"}
+                )
+                state["steering_history"].append(
+                    {
+                        "content": content,
+                        "delivery": str(payload.get("delivery") or "after_tool"),
+                        "applied_at": str(payload.get("boundary") or "unknown"),
+                    }
+                )
+        elif event_type == "turn.completed":
+            state["finished"] = True
+            state["finish_reason"] = (event.get("payload") or {}).get("finish_reason")
+        elif event_type == "turn.failed":
+            state["finished"] = True
+            state["finish_reason"] = "error"
+        elif event_type == "user_input":
             if assistant_text:
                 state["messages"].append({"role": "assistant", "content": assistant_text})
                 assistant_text = ""

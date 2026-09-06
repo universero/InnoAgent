@@ -122,14 +122,77 @@ def render_sessions(records: list[SessionRecord]) -> str:
 def render_event(event: dict[str, Any]) -> str:
     """Render one structured runtime event for the CLI."""
     event_type = event.get("type", "")
-    if event_type in {"text.delta", "reasoning.delta"}:
+    if event_type == "item.delta":
         return ""
-    if event_type == "user_input":
+    if event_type in {"turn.started", "response.completed", "state.checkpoint"}:
         return ""
-    if event_type == "session_meta":
-        return ""
-    if event_type == "state_snapshot":
-        return ""
+    if event_type == "item.started" and event.get("item_type") == "tool_call":
+        return f"[tool] {event.get('tool_name') or '?'}"
+    if event_type == "item.completed":
+        item_type = event.get("item_type")
+        payload = event.get("payload") or {}
+        stage = event.get("stage", "main")
+        if item_type == "message":
+            if payload.get("streamed"):
+                return ""
+            content = str(payload.get("content") or event.get("content") or "")
+            return f"[{stage}] {content}" if stage != "main" else content
+        if item_type == "tool_call":
+            tool_name = event.get("tool_name") or payload.get("name") or "?"
+            arguments = event.get("arguments") or payload.get("arguments") or {}
+            arguments_text = ", ".join(f"{key}={value}" for key, value in arguments.items())
+            return f"[tool call] {tool_name}({arguments_text})"
+        if item_type == "tool_result":
+            result = payload.get("result") or event.get("result") or {}
+            tool_name = event.get("tool_name") or result.get("tool_name") or "?"
+            status = result.get("status", "?")
+            output = str(result.get("output") or "")
+            lines = [f"[tool {status}] {tool_name}"]
+            if output:
+                lines.extend(f"  {line}" for line in output.splitlines())
+            for warning in result.get("warnings") or []:
+                lines.append(f"  warning: {warning}")
+            return "\n".join(lines)
+        if item_type == "plan":
+            plan = payload.get("plan") or {}
+            tasks = payload.get("tasks") or []
+            return f"[plan] revision {plan.get('revision', '?')} · {len(tasks)} tasks"
+        if item_type == "reflection":
+            status = "complete" if payload.get("complete") else "continue"
+            detail = payload.get("summary") or payload.get("feedback") or ""
+            return f"[reflect {status}] {detail}".rstrip()
+        if item_type == "user_question":
+            return f"[question] {payload.get('content', '')}"
+    if event_type == "approval.requested":
+        payload = event.get("payload") or {}
+        tool_name = event.get("tool_name") or payload.get("tool_name") or "?"
+        return (
+            f"[permission] {tool_name} requires approval\n"
+            "  allow once / always allow here / deny"
+        )
+    if event_type == "approval.resolved":
+        return f"[permission] {event.get('payload', {}).get('decision', 'resolved')}"
+    if event_type == "context.compaction.started":
+        return "[compact] summarizing older context..."
+    if event_type == "context.compaction.completed":
+        payload = event.get("payload") or {}
+        ratio = float(payload.get("compression_ratio", 1.0)) * 100
+        return (
+            f"[compact] {payload.get('tokens_before', 0)} -> "
+            f"{payload.get('tokens_after', 0)} tokens ({ratio:.1f}% retained)"
+        )
+    if event_type == "steering.queued":
+        delivery = event.get("payload", {}).get("delivery", "after_tool")
+        return f"[steer queued] delivery={delivery}"
+    if event_type == "steering.applied":
+        payload = event.get("payload", {})
+        return f"[steer applied] {payload.get('content', '')}"
+    if event_type == "steering.stop_requested":
+        return "[stop] will stop at the next safe boundary"
+    if event_type == "steering.stopped":
+        return "[stop] turn stopped"
+    if event_type == "turn.failed":
+        return f"[error] {event.get('payload', {}).get('finish_reason', 'turn failed')}"
     if event_type == "tool":
         tool_name = event.get("tool_name") or "?"
         arguments = event.get("arguments") or {}

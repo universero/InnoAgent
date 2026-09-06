@@ -12,6 +12,11 @@ from core.tool.base import BaseTool, ToolContext, ToolResult
 from core.tool.decorators import tool
 
 
+TOOL_PROMPT = """Create a task under the active plan or update one task's status and result. Keep
+task state honest: mark in_progress when starting, done only after verification, and blocked when a
+specific unresolved dependency prevents progress."""
+
+
 class TaskInput(BaseModel):
     """Arguments accepted by the task tool."""
     task_id: str | None = None
@@ -24,8 +29,9 @@ class TaskInput(BaseModel):
 class TaskTool(BaseTool):
     """Expose task creation and status updates as a tool."""
     name = "task"
-    description = "创建任务或更新任务状态。"
+    description = TOOL_PROMPT
     input_model = TaskInput
+    parallel_safe = False
 
     def dynamic_description(self, context: ToolContext | None = None) -> str:
         """Expose current task statistics to the model."""

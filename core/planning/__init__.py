@@ -1,1 +1,1 @@
-"""Planning subgraph and domain models."""
+"""Planning service and domain models."""

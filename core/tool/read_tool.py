@@ -10,6 +10,11 @@ from core.tool.base import BaseTool, ToolContext, ToolResult
 from core.tool.decorators import tool
 
 
+TOOL_PROMPT = """Read a UTF-8 text file inside the workspace, optionally by inclusive line range.
+Use this before modifying an existing file. Prefer a useful window over many tiny reads. The result
+includes path, size, line count, and the actual returned range."""
+
+
 class ReadInput(BaseModel):
     """Arguments accepted by the read tool."""
     path: str
@@ -21,7 +26,7 @@ class ReadInput(BaseModel):
 class ReadTool(BaseTool):
     """Read file contents, optionally by line range."""
     name = "read"
-    description = "读取文件内容，可指定起始和结束行。"
+    description = TOOL_PROMPT
     input_model = ReadInput
 
     def run(self, tool_input: BaseModel, context: ToolContext) -> ToolResult:

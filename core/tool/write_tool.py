@@ -10,6 +10,11 @@ from core.tool.base import BaseTool, ToolContext, ToolResult
 from core.tool.decorators import write_tool
 
 
+TOOL_PROMPT = """Create or overwrite a UTF-8 file inside the workspace. Read an existing target
+before writing it and preserve unrelated user changes. This is a mutating operation and may require
+runtime approval. Prefer focused edits; do not create documentation unless the user requested it."""
+
+
 class WriteInput(BaseModel):
     """Arguments accepted by the write tool."""
     path: str
@@ -20,7 +25,7 @@ class WriteInput(BaseModel):
 class WriteTool(BaseTool):
     """Create or overwrite files."""
     name = "write"
-    description = "创建或覆盖文件。写操作会先执行 Guardrail 的写前读检查。"
+    description = TOOL_PROMPT
     input_model = WriteInput
     is_write = True
 

@@ -1,1 +1,1 @@
-"""Reflection subgraph and domain models."""
+"""Goal reflection service and domain models."""
