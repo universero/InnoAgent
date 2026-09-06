@@ -15,8 +15,8 @@
 ## P0：可信本地 Coding Agent
 
 - 为写文件和 shell 引入稳定 operation id、请求摘要和重复执行保护。
-- 使用原子写、patch/diff、文件版本检查和变更预览替代简单覆盖。
-- 为 shell 增加超时、输出流、进程树清理和结构化退出原因。
+- 在现有原子写和 SHA-256 冲突检查上增加 patch/diff 与变更预览。
+- 在现有超时、POSIX 进程组清理和结构化结果上，增加实时输出、跨平台进程树清理和细粒度取消。
 - 增加 Git diff、测试结果和文件存在性等确定性 verifier。
 - 为 session schema、事件和 checkpoint 增加版本与迁移测试。
 

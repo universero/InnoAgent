@@ -25,6 +25,8 @@ Model Tool Intent
 - 结构化 `ToolResult`：`status`、`output`、`data`、`warnings`、`metadata`。
 - 可观察的失败，而不是抛出模型无法处理的裸异常。
 
+所有内置工具输入都拒绝未知字段，并为模型 schema 中的每个参数提供用途和边界说明。`read` 返回内容摘要哈希；`write` 可携带该哈希做乐观并发检查，并通过同目录临时文件原子替换目标。
+
 首期工具包括 `read`、`write`、`ls`、`grep`、`shell`、`plan`、`task`、`skill` 和 `subagent`。提示词与工具实现放在同一文件的模块级常量中，便于能力和约束一起维护。
 
 ## 权限模型
@@ -53,6 +55,8 @@ Model Tool Intent
 
 - 文件工具通过 `allowed_roots` 限制工作区，解析路径后再判断，防止 `..` 和符号链接逃逸。
 - `write` 执行前要求读取目标，降低盲覆盖风险。
+- `write.expected_sha256` 会在替换前校验文件版本，发现并发修改时拒绝覆盖并要求重新读取。
 - shell 使用本机 shell，不是安全沙箱；`auto` 只适用于可信仓库。
+- shell 在 POSIX 系统中按进程组执行，超时后清理进程组，并保留已产生的标准输出、错误输出和退出状态。
 - 工具输出有字符上限，避免一次结果耗尽上下文。
 - API 返回成功不等于业务效果正确。高风险写操作未来需要稳定 `operation_id`、unknown-effect 对账和独立 verifier。

@@ -18,18 +18,20 @@ def search_tools(
     the tool inventory grows, this function can be replaced with embeddings
     without changing the runtime contract.
     """
+    limit = max(1, limit)
     terms = [term.lower() for term in query.split() if term]
     if not terms:
         return [
-            {"name": tool.name, "description": tool.description}
+            {"name": tool.name, "description": tool.dynamic_description(context)}
             for tool in registry.list_tools()[:limit]
         ]
 
     scored: list[tuple[int, str, str]] = []
     for tool in registry.list_tools():
-        haystack = f"{tool.name} {tool.description}".lower()
+        description = tool.dynamic_description(context)
+        haystack = f"{tool.name} {description}".lower()
         score = sum(1 for term in terms if term in haystack)
         if score:
-            scored.append((score, tool.name, tool.description))
+            scored.append((score, tool.name, description))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [{"name": name, "description": desc} for _, name, desc in scored[:limit]]

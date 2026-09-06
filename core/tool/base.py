@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ToolCall(BaseModel):
@@ -55,7 +55,13 @@ class ToolResult(BaseModel):
         return "\n".join(parts)
 
 
-class EmptyInput(BaseModel):
+class ToolInput(BaseModel):
+    """Strict base model shared by model-facing tool arguments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EmptyInput(ToolInput):
     """Default input schema for tools without arguments."""
 
 
@@ -86,7 +92,7 @@ class BaseTool(ABC):
     description: ClassVar[str]
     input_model: ClassVar[type[BaseModel]] = EmptyInput
 
-    # Tool policy hints consumed by guardrails.
+    # 这些属性是 Runtime 的策略输入，不能由模型参数覆盖。
     is_write: ClassVar[bool] = False
     requires_confirmation: ClassVar[bool] = False
     parallel_safe: ClassVar[bool] = True

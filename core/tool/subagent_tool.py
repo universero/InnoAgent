@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
 
-from core.tool.base import BaseTool, ToolContext, ToolResult
+from pydantic import Field
+
+from core.tool.base import BaseTool, ToolContext, ToolInput, ToolResult
 from core.tool.decorators import tool
 
 
-TOOL_PROMPT = """Delegate a focused, independently solvable task to an isolated subagent. Use it
-for bounded research or verification that would otherwise consume substantial parent context.
-Provide a precise deliverable and the smallest necessary read-only tool allowlist. The subagent
-cannot delegate again."""
+TOOL_PROMPT = """Delegate one focused, independently verifiable read-only task to an isolated
+subagent. Use it when context isolation or a focused investigation provides clear value, not for work
+the main agent can do directly. State the expected deliverable and grant the smallest tool set. The
+subagent receives no parent conversation, cannot modify files, and cannot delegate again."""
 
 
-class SubagentInput(BaseModel):
-    task: str
-    role: str = "researcher"
-    allowed_tools: list[str] = Field(default_factory=lambda: ["read", "ls", "grep"])
+class SubagentInput(ToolInput):
+    task: str = Field(
+        min_length=1,
+        description="Self-contained delegated task and expected output.",
+    )
+    role: str = Field(default="researcher", min_length=1, description="Concise specialist role.")
+    allowed_tools: list[Literal["read", "ls", "grep"]] = Field(
+        default_factory=lambda: ["read", "ls", "grep"],
+        min_length=1,
+        description="Smallest required subset of read, ls, and grep.",
+    )
 
 
 @tool
@@ -25,11 +34,16 @@ class SubagentTool(BaseTool):
     name = "subagent"
     description = TOOL_PROMPT
     input_model = SubagentInput
+    parallel_safe = False
 
-    def run(self, tool_input: BaseModel, context: ToolContext) -> ToolResult:
+    def run(self, tool_input: SubagentInput, context: ToolContext) -> ToolResult:
         runner = context.services.get("subagent_runner")
         if runner is None:
-            return ToolResult(tool_name=self.name, status="error", output="subagent runner unavailable")
+            return ToolResult(
+                tool_name=self.name,
+                status="error",
+                output="subagent runner unavailable",
+            )
         result = runner(
             task=tool_input.task,
             role=tool_input.role,

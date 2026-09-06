@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import Field
 
 from core.planning.planner import PlanningService
 from core.planning.schemas import PlanningRequest
-from core.tool.base import BaseTool, ToolContext, ToolResult
+from core.tool.base import BaseTool, ToolContext, ToolInput, ToolResult
 from core.tool.decorators import tool
 
 
-TOOL_PROMPT = """Enter the planning stage to create or revise an inspectable plan for a multi-step
-goal. Use it when sequencing, dependencies, or progress tracking add value. Do not use it for a
-single obvious action. Reflection feedback can be supplied when revising the plan."""
+TOOL_PROMPT = """Create or revise the active execution plan through the dedicated Planning graph.
+Use this for multi-step work when sequencing, dependencies, verification, or visible progress adds
+value; do not use it for one obvious action. Pass the complete goal and include concrete feedback
+when revising. This tool plans only: it does not execute commands or modify files."""
 
 
-class PlanInput(BaseModel):
+class PlanInput(ToolInput):
     """Arguments accepted by the plan tool."""
-    goal: str
-    feedback: str | None = None
+    goal: str = Field(min_length=1, description="Complete goal the plan must satisfy.")
+    feedback: str | None = Field(
+        default=None,
+        description="Specific reason the existing plan must be revised.",
+    )
 
 
 @tool
@@ -41,7 +45,7 @@ class PlanTool(BaseTool):
             f"rev{plan.get('revision', 1)}，共 {len(steps)} 个步骤。"
         )
 
-    def run(self, tool_input: BaseModel, context: ToolContext) -> ToolResult:
+    def run(self, tool_input: PlanInput, context: ToolContext) -> ToolResult:
         """Create or update the active plan through the configured planner."""
         args = tool_input.model_dump()
         runner = context.services.get("plan_runner")

@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 
 from core.skill.loader import SkillLoader
+from core.tool.base import ToolContext
+from core.tool.skill_tool import SkillTool
 
 
 class SkillLoaderTest(unittest.TestCase):
@@ -38,6 +40,23 @@ class SkillLoaderTest(unittest.TestCase):
                 path.write_text(f"---\nname: demo\ndescription: {description}\n---\n", encoding="utf-8")
             loader = SkillLoader(project, home=home)
             self.assertEqual(loader.discover()[0].description, "project")
+
+    def test_skill_tool_activates_body_without_repeating_it_in_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".agents" / "skills" / "demo" / "SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "---\nname: demo\ndescription: Demo skill.\n---\n\nPRIVATE BODY",
+                encoding="utf-8",
+            )
+            loader = SkillLoader(tmp, home=Path(tmp) / "home")
+            result = SkillTool().execute(
+                {"name": "demo"},
+                ToolContext(services={"skill_loader": loader}),
+            )
+            self.assertEqual(result.status, "success")
+            self.assertNotIn("PRIVATE BODY", result.output)
+            self.assertIn("PRIVATE BODY", result.data["active_skill"]["content"])
 
 
 if __name__ == "__main__":
