@@ -19,7 +19,7 @@ from view.cli import InnoAgentCLI
 from view.commands import command_info, parse_command
 from view.render import render_event, render_events, render_sessions, render_state, render_tools
 from view.terminal import TerminalIO
-from view.tui_theme import TUI_STYLE
+from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
 
 class CliTest(unittest.TestCase):
@@ -151,6 +151,13 @@ class CliTest(unittest.TestCase):
         self.assertIn("你好，我是 InnoAgent。", ui.transcript_text)
         self.assertIn("下一行", ui.transcript_text)
         self.assertEqual(ui._stream_pending, "")
+
+    def test_agent_body_uses_explicit_black_text(self) -> None:
+        attrs = OUTPUT_STYLE.get_attrs_for_style_str("class:output.body")
+
+        self.assertEqual(attrs.color, "202124")
+        self.assertFalse(attrs.bold)
+        self.assertFalse(attrs.italic)
 
     def test_inline_tui_only_shows_meaningful_activity(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())

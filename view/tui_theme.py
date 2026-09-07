@@ -41,6 +41,6 @@ OUTPUT_STYLE = Style.from_dict(
         "output.error": "ansired bold",
         "output.plan": "ansicyan bold",
         "output.muted": "ansibrightblack",
-        "output.body": "",
+        "output.body": "#202124 nobold noitalic",
     }
 )
