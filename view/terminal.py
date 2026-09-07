@@ -18,6 +18,7 @@ from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText, Style
 from prompt_toolkit.input.base import Input
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Dimension
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.output.base import Output
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import CompleteStyle
@@ -102,13 +103,19 @@ class TerminalIO:
     def run(self, submit_handler: SubmitHandler) -> None:
         """Run an inline prompt without switching to the alternate screen."""
         self._submit_handler = submit_handler
-        asyncio.run(self._run_async())
+        try:
+            asyncio.run(self._run_async())
+        except KeyboardInterrupt:
+            # 防御极短时序内未被 prompt_toolkit 键位接管的系统 SIGINT。
+            self._running = False
 
     async def _run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
         self._running = True
         self._flush_direct()
+        prompt_task: asyncio.Task[str] | None = None
+        stop_task: asyncio.Task[bool] | None = None
 
         try:
             with patch_stdout(raw=True):
@@ -143,6 +150,13 @@ class TerminalIO:
                         await asyncio.sleep(0)
         finally:
             self._running = False
+            for task in (prompt_task, stop_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            for task in (prompt_task, stop_task):
+                if task is not None:
+                    with suppress(asyncio.CancelledError, KeyboardInterrupt):
+                        await task
             if self._flush_task and not self._flush_task.done():
                 await self._flush_task
             if self._dispatch_tasks:
@@ -453,6 +467,13 @@ class TerminalIO:
 
     def _key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
+
+        @bindings.add("c-c", eager=True)
+        @bindings.add(Keys.SIGINT, eager=True)
+        def _interrupt(event) -> None:
+            # 无论空闲还是执行中都走 /quit；CLI 会在执行中先请求安全停止。
+            event.current_buffer.reset()
+            event.app.exit(result="/quit")
 
         @bindings.add("c-l")
         def _clear(event) -> None:

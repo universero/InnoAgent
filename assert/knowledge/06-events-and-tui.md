@@ -120,6 +120,8 @@ TUI 输入由 `_dispatch_tui_input()` 按状态路由：
 
 Slash 命令是控制输入，不追加为普通用户消息。否则模型会把“切换模式”误解为业务任务，Session 重放也无法区分控制行为。
 
+`Ctrl-C` 在 TUI 键位层同时接管字符输入和 `SIGINT`，统一转换为 `/quit`。空闲时直接结束输入循环；执行中复用 `/quit` 的安全停止路径，先向 Runtime 提交停止请求，等待当前工具边界完成后退出。`TerminalIO.run()` 仍捕获极端时序下的 `KeyboardInterrupt`，并在退出前回收 prompt 子任务，避免 traceback 和未读取任务异常。
+
 `view/resume.py` 将恢复选择与 CLI 主类分开：`pick_session()` 优先按 session id 加载，失败后再按名称匹配；未指定目标时选择最近会话。`resume_summary()` 只展示名称、Goal 和 Plan 状态，不复制历史正文。这样恢复入口保持确定性，也避免会话列表和启动提示意外泄露大量上下文。
 
 ## TUI 结构

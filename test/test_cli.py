@@ -163,6 +163,42 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(submitted, ["/quit"])
 
+    def test_ctrl_c_is_converted_to_graceful_quit(self) -> None:
+        with create_pipe_input() as pipe_input:
+            ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())
+            submitted: list[str] = []
+
+            def submit(text: str) -> None:
+                submitted.append(text)
+                ui.stop()
+
+            pipe_input.send_bytes(b"\x03")
+            ui.run(submit)
+
+        self.assertEqual(submitted, ["/quit"])
+
+    def test_quit_during_work_requests_stop_then_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    memory_enabled=False,
+                ),
+                model=FakeModel(),
+            )
+            cli = InnoAgentCLI(runtime, input_fn=lambda prompt="": "", output_fn=lambda _: None)
+            cli.terminal = MagicMock()
+            cli._tui_busy = True
+            cli._tui_accepts_steering = True
+
+            with patch.object(runtime, "request_stop", return_value=True) as request_stop:
+                asyncio.run(cli._dispatch_tui_input("/quit"))
+
+            self.assertTrue(cli._quit_when_idle)
+            request_stop.assert_called_once_with(session_id=None)
+
     def test_inline_prompt_accepts_input_while_previous_work_is_running(self) -> None:
         with create_pipe_input() as pipe_input:
             ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())

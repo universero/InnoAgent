@@ -297,7 +297,7 @@ uv run python main.py
 
 - `Enter`：发送任务、纠偏或审批选项。
 - `Tab`：补全 slash 命令。
-- `Ctrl-C`：请求在安全边界停止当前 turn；空闲时清空输入框。
+- `Ctrl-C`：优雅退出；若 turn 正在执行，先请求在安全边界停止，再退出程序。
 - `Ctrl-L`：清空当前终端可见区域，不删除 session 数据。
 - `F1`：显示命令帮助。
 - `Ctrl-Q` / 空输入时 `Ctrl-D`：退出。
