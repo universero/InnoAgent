@@ -7,6 +7,7 @@ from typing import Any
 from core.runtime.agent import InnoAgentRuntime
 from core.session.store import SessionRecord
 from observe.traces import TraceStore
+from view.resume import recent_user_input
 
 
 def render_events(tracer: TraceStore, start_index: int) -> list[str]:
@@ -111,10 +112,11 @@ def render_sessions(records: list[SessionRecord]) -> str:
         return "没有可恢复的 session。"
     lines = ["可恢复 session："]
     for record in records:
-        goal = record.goal or "无 goal"
         label = record.name or record.session_id
+        identity = f"  id={record.session_id}" if record.name else ""
         lines.append(
-            f"  {label}  id={record.session_id}  mode={record.mode}  goal={goal}"
+            f"  {label}{identity}  mode={record.mode}  "
+            f"最近输入={recent_user_input(record)}"
         )
     return "\n".join(lines)
 
@@ -195,7 +197,9 @@ def render_event(event: dict[str, Any]) -> str:
     if event_type == "steering.stopped":
         return "[stop] turn stopped"
     if event_type == "turn.failed":
-        return f"[error] {event.get('payload', {}).get('finish_reason', 'turn failed')}"
+        payload = event.get("payload", {})
+        detail = payload.get("error") or payload.get("finish_reason") or "turn failed"
+        return f"[error] {detail}"
     if event_type == "tool":
         tool_name = event.get("tool_name") or "?"
         arguments = event.get("arguments") or {}

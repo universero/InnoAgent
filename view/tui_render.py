@@ -23,10 +23,14 @@ def present_event(event: dict[str, Any], rendered: str = "") -> EventPresentatio
     stage = str(event.get("stage") or "main")
 
     if event_type == "item.delta" and item_type in {"message", "reasoning"}:
-        channel = stage if stage in {"plan", "reflect"} else item_type
-        activity = {"plan": "Planning", "reflect": "Reflecting"}.get(stage)
+        if stage in {"plan", "reflect"}:
+            # Planning/Reflection 的模型输出是内部 JSON 协议，只展示阶段状态，
+            # 最终内容由对应的语义完成事件渲染。
+            return EventPresentation(
+                activity="Planning" if stage == "plan" else "Reflecting"
+            )
         content = str(event.get("delta") or event.get("content") or "")
-        return EventPresentation(activity=activity, stream=(channel, content))
+        return EventPresentation(stream=(item_type, content))
     if event_type == "turn.started":
         return EventPresentation(activity="Thinking")
     if event_type == "turn.completed":
@@ -47,9 +51,25 @@ def present_event(event: dict[str, Any], rendered: str = "") -> EventPresentatio
         if warnings:
             body = "\n".join(filter(None, [body, *(f"warning: {item}" for item in warnings)]))
         return EventPresentation(activity="Thinking", block=(tone, f"{name} · {status}", body))
+    if (
+        event_type == "item.completed"
+        and item_type in {"message", "reasoning"}
+        and stage in {"plan", "reflect"}
+    ):
+        return EventPresentation(
+            activity="Planning" if stage == "plan" else "Reflecting"
+        )
     if event_type == "item.completed" and item_type == "message":
         content = str(payload.get("content") or event.get("content") or "")
         block = None if payload.get("streamed") or not content else ("agent", "Agent", content)
+        return EventPresentation(block=block)
+    if event_type == "item.completed" and item_type == "reasoning":
+        content = str(payload.get("content") or event.get("content") or "")
+        block = (
+            None
+            if payload.get("streamed") or not content
+            else ("thinking", "Thinking", content)
+        )
         return EventPresentation(block=block)
     if event_type == "item.completed" and item_type == "plan":
         plan = payload.get("plan") or {}
@@ -63,15 +83,10 @@ def present_event(event: dict[str, Any], rendered: str = "") -> EventPresentatio
             ),
         )
     if event_type == "item.completed" and item_type == "reflection":
-        complete = bool(payload.get("complete"))
-        detail = str(payload.get("summary") or payload.get("feedback") or "")
+        tone, title, body = format_reflection(payload)
         return EventPresentation(
             activity="Reflecting",
-            block=(
-                "success" if complete else "plan",
-                "Reflection · complete" if complete else "Reflection · continue",
-                detail,
-            ),
+            block=(tone, title, body),
         )
     if event_type == "item.completed" and item_type == "user_question":
         question = str(
@@ -127,6 +142,53 @@ def format_arguments(arguments: dict[str, Any]) -> str:
         compact = " ".join(str(value).split())
         parts.append(f"{key}={clip(compact, 120)}")
     return ", ".join(parts)
+
+
+def format_reflection(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """Render a structured reflection result without exposing its JSON protocol."""
+    complete = bool(payload.get("complete"))
+    blocked = bool(payload.get("blocked"))
+    needs_user = bool(payload.get("needs_user"))
+    if complete:
+        tone, title = "success", "Reflection · Goal complete"
+    elif blocked:
+        tone, title = "error", "Reflection · Blocked"
+    elif needs_user:
+        tone, title = "warning", "Reflection · Needs input"
+    else:
+        tone, title = "plan", "Reflection · Continue"
+
+    lines: list[str] = []
+    confidence = payload.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        percent = round(max(0.0, min(1.0, float(confidence))) * 100)
+        lines.append(f"Confidence {percent}%")
+
+    summary = str(payload.get("summary") or "").strip()
+    feedback = str(payload.get("feedback") or "").strip()
+    question = str(payload.get("question") or "").strip()
+    if summary:
+        lines.extend(["", summary] if lines else [summary])
+    if feedback and feedback != summary:
+        lines.extend(["", f"Next: {feedback}"])
+    if question:
+        lines.extend(["", f"Question: {question}"])
+
+    _append_list(lines, "Missing", payload.get("missing_conditions"))
+    _append_list(lines, "Evidence", payload.get("evidence"))
+    return tone, title, compact_body("\n".join(lines), max_lines=16, max_chars=2200)
+
+
+def _append_list(lines: list[str], title: str, values: Any) -> None:
+    if not isinstance(values, (list, tuple)):
+        return
+    items = [str(item).strip() for item in (values or []) if str(item).strip()]
+    if not items:
+        return
+    lines.extend(["", title])
+    lines.extend(f"• {clip(item, 220)}" for item in items[:6])
+    if len(items) > 6:
+        lines.append(f"• … {len(items) - 6} more")
 
 
 def compact_body(value: str, max_lines: int = 14, max_chars: int = 1800) -> str:

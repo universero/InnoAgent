@@ -14,6 +14,7 @@ from typing import Any
 
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.application import run_in_terminal
+from prompt_toolkit.buffer import CompletionState
 from prompt_toolkit.completion import Completer, Completion, CompleteEvent
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText, StyleAndTextTuples
@@ -28,6 +29,7 @@ from prompt_toolkit.utils import get_cwidth
 
 from core import __version__
 from view.commands import COMMAND_SPECS, CommandChoice, static_command_choices
+from view.markdown import is_table_row, render_markdown, render_markdown_line
 from view.tui_render import present_event
 from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
@@ -103,12 +105,7 @@ class SelectionCompleter(Completer):
             )
 
     def _ordered_values(self) -> list[str]:
-        options = list(self.state.options)
-        if self.state.selected_index < len(options):
-            index = self.state.selected_index
-            options = options[index:] + options[:index]
-            return options + ([CUSTOM_INPUT_OPTION] if self.state.allow_custom else [])
-        return [CUSTOM_INPUT_OPTION, *options] if self.state.allow_custom else options
+        return self.state.values()
 
 
 class SlashCommandCompleter(Completer):
@@ -194,6 +191,9 @@ class TerminalIO:
         self._selection: SelectionState | None = None
         self._stream_kind: str | None = None
         self._stream_pending = ""
+        self._stream_code_open = False
+        self._stream_code_language = ""
+        self._stream_table_lines: list[str] = []
         self._transcript_text = ""
         self._model = "custom"
         self._effort = ""
@@ -303,6 +303,9 @@ class TerminalIO:
                         continue
                     if selection is not None:
                         self._finish_selection(selection, text or None)
+                        # 先让等待选择结果的控制任务恢复。连续选择（如 model -> effort）
+                        # 必须在普通输入框重开前注册，否则下一次按键会被误投递为 TurnInput。
+                        await asyncio.sleep(0)
                     elif text:
                         self._submit(text)
                         # 让 dispatch 先更新 busy/approval，
@@ -491,6 +494,9 @@ class TerminalIO:
                 self._transcript_text = ""
                 self._stream_kind = None
                 self._stream_pending = ""
+                self._stream_code_open = False
+                self._stream_code_language = ""
+                self._stream_table_lines = []
                 operations.append(([('', "\x1b[2J\x1b[H")], ""))
         return operations
 
@@ -569,11 +575,62 @@ class TerminalIO:
         # run_in_terminal 每次恢复 Prompt 后不会保留上一批输出的水平光标位置。
         # 只输出完整行，尾部片段留到下一批或完成事件，避免增量 token 相互覆盖。
         self._stream_pending += value
-        body_style = "class:output.body" if kind == "agent" else f"class:output.{kind}"
         while "\n" in self._stream_pending:
             line, self._stream_pending = self._stream_pending.split("\n", 1)
-            operations.append(([(body_style, f"  {line}")], "\n"))
+            operations.extend(self._append_stream_line(kind, line))
         return operations
+
+    def _append_stream_line(self, kind: str, line: str) -> list[PrintOperation]:
+        """Render one complete model line, buffering tables until their end."""
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            operations = self._flush_stream_table(kind)
+            if self._stream_code_open:
+                self._stream_code_open = False
+                self._stream_code_language = ""
+                operations.append(([('class:output.code.border', "  ╰─")], "\n"))
+                return operations
+            self._stream_code_open = True
+            self._stream_code_language = stripped[3:].strip() or "code"
+            operations.append(
+                (
+                    [
+                        (
+                            "class:output.code.border",
+                            f"  ╭─ {self._stream_code_language}",
+                        )
+                    ],
+                    "\n",
+                )
+            )
+            return operations
+        if self._stream_code_open:
+            return [
+                (
+                    [
+                        ("class:output.code.border", "  │ "),
+                        ("class:output.code", line),
+                    ],
+                    "\n",
+                )
+            ]
+        body_style = "class:output.body" if kind == "agent" else f"class:output.{kind}"
+        if is_table_row(line):
+            self._stream_table_lines.append(line)
+            return []
+        operations = self._flush_stream_table(kind)
+        operations.append(
+            (render_markdown_line(line, base_style=body_style), "\n")
+        )
+        return operations
+
+    def _flush_stream_table(self, kind: str) -> list[PrintOperation]:
+        if not self._stream_table_lines:
+            return []
+        body_style = "class:output.body" if kind == "agent" else f"class:output.{kind}"
+        table = "\n".join(self._stream_table_lines)
+        self._stream_table_lines = []
+        return [(render_markdown(table, base_style=body_style), "\n")]
 
     def _close_stream(self) -> list[PrintOperation]:
         if self._stream_kind is None:
@@ -584,8 +641,12 @@ class TerminalIO:
         self._stream_pending = ""
         operations: list[PrintOperation] = []
         if pending:
-            body_style = "class:output.body" if kind == "agent" else f"class:output.{kind}"
-            operations.append(([(body_style, f"  {pending}")], "\n"))
+            operations.extend(self._append_stream_line(kind, pending))
+        operations.extend(self._flush_stream_table(kind))
+        if self._stream_code_open:
+            operations.append(([('class:output.code.border', "  ╰─")], "\n"))
+            self._stream_code_open = False
+            self._stream_code_language = ""
         operations.append(([('', "")], "\n"))
         return operations
 
@@ -607,12 +668,36 @@ class TerminalIO:
         ]
         if body:
             fragments.append(("", "\n"))
-            for index, line in enumerate(body.splitlines()):
-                if index:
-                    fragments.append(("", "\n"))
-                fragments.append(("class:output.body", f"  {line}"))
+            fragments.extend(
+                self._format_markdown_body(
+                    body,
+                    markdown=tone in {"agent", "thinking"},
+                    body_style=(
+                        "class:output.thinking"
+                        if tone == "thinking"
+                        else "class:output.body"
+                    ),
+                )
+            )
         operations.append((fragments, "\n\n"))
         return operations
+
+    @staticmethod
+    def _format_markdown_body(
+        body: str,
+        *,
+        markdown: bool,
+        body_style: str,
+    ) -> StyleAndTextTuples:
+        """Format completed model text using the terminal Markdown renderer."""
+        if markdown:
+            return render_markdown(body, base_style=body_style)
+        fragments: StyleAndTextTuples = []
+        for index, line in enumerate(body.splitlines()):
+            if index:
+                fragments.append(("", "\n"))
+            fragments.append((body_style, f"  {line}"))
+        return fragments
 
     def _apply_event(self, event: dict[str, Any], rendered: str) -> list[PrintOperation]:
         presentation = present_event(event, rendered)
@@ -644,7 +729,7 @@ class TerminalIO:
         return self._append_block(
             "warning",
             f"Approval · {approval.get('tool', 'tool')}",
-            f"{detail}\n1 Allow once   2 Always here   3 Deny",
+            detail,
         )
 
     def _render_operations(self, operations: list[PrintOperation]) -> None:
@@ -838,7 +923,6 @@ class TerminalIO:
                 return
             if selection.custom_input and selection.options:
                 selection.custom_input = False
-                event.current_buffer.reset()
                 self._start_selection(selection)
                 event.app.invalidate()
                 return
@@ -850,7 +934,19 @@ class TerminalIO:
         if selection.custom_input:
             return
         buffer = self.session.app.current_buffer
-        buffer.start_completion(select_first=True)
+        buffer.reset()
+        completions = list(
+            SelectionCompleter(selection).get_completions(
+                buffer.document,
+                CompleteEvent(completion_requested=True),
+            )
+        )
+        if not completions:
+            return
+        index = min(selection.selected_index, len(completions) - 1)
+        # Selector 候选很少且已在内存中，同步设置可避免异步补全尚未完成时高亮错位。
+        buffer.complete_state = CompletionState(buffer.document, completions)
+        buffer.go_to_completion(index)
 
     def _move_selection(self, event: Any, offset: int) -> None:
         selection = self._selection
@@ -872,8 +968,7 @@ class TerminalIO:
         if not values:
             return
         selection.selected_index = (selection.selected_index + offset) % len(values)
-        event.current_buffer.reset()
-        event.current_buffer.start_completion(select_first=True)
+        self._start_selection(selection)
         event.app.invalidate()
 
     def _finish_selection(

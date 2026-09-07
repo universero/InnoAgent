@@ -36,11 +36,16 @@ class CommandChoice:
 COMMAND_SPECS = (
     CommandSpec("help", "/help", "show available commands and shortcuts"),
     CommandSpec("status", "/status", "show session, model, goal, and usage"),
-    CommandSpec("context", "/context", "show context-window usage"),
+    CommandSpec(
+        "context",
+        "/context [max|threshold|keep|reset] [value]",
+        "show or configure context and compaction limits",
+        ("max", "threshold", "keep", "reset"),
+    ),
     CommandSpec(
         "goal",
         "/goal <text|off>",
-        "set or clear the active goal",
+        "set and run a goal, or clear it with off",
         ("off", "clear"),
     ),
     CommandSpec("plan", "/plan", "show the current plan"),
@@ -53,7 +58,7 @@ COMMAND_SPECS = (
         "choose approval behavior",
         ("ask", "auto", "readonly"),
     ),
-    CommandSpec("model", "/model", "select a model from the configured provider"),
+    CommandSpec("model", "/model", "select a model and reasoning effort"),
     CommandSpec("tools", "/tools", "list registered tools"),
     CommandSpec("skills", "/skills", "list discovered Skills"),
     CommandSpec("skill", "/skill <name>", "activate a Skill"),
