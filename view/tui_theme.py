@@ -23,9 +23,9 @@ TUI_STYLE = Style.from_dict(
         "bottom-toolbar": "noreverse bg:default #64748b",
         "bottom-toolbar.text": "noreverse bg:default #64748b",
         "completion-menu.completion": "bg:#eff6ff #1e3a5f",
-        "completion-menu.completion.current": "bg:#2563eb #ffffff bold",
+        "completion-menu.completion.current": "bg:#dbeafe #1d4ed8 bold",
         "completion-menu.meta.completion": "bg:#eff6ff #64748b",
-        "completion-menu.meta.completion.current": "bg:#2563eb #dbeafe",
+        "completion-menu.meta.completion.current": "bg:#dbeafe #475569",
     }
 )
 
@@ -42,5 +42,8 @@ OUTPUT_STYLE = Style.from_dict(
         "output.plan": "ansicyan bold",
         "output.muted": "ansibrightblack",
         "output.body": "#202124 nobold noitalic",
+        "startup.border": "#94a3b8",
+        "startup.title": "ansiblue bold",
+        "startup.body": "#202124",
     }
 )

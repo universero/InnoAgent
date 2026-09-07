@@ -8,37 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime.agent import InnoAgentRuntime
-from view.commands import Command, parse_command
+from view.commands import Command, command_help_text, parse_command
 from view.render import render_event, render_sessions, render_state, render_tools
 from view.resume import pick_session, resume_summary
 from view.terminal import TerminalIO
 
 
-HELP_TEXT = """InnoAgent commands
-
-  /help                         show this help
-  /status                       session, goal, mode, model, and usage
-  /context                      context-window usage
-  /goal <text|off>              set or clear the active goal
-  /plan                         show the current plan
-  /tasks                        show task progress
-  /compact [focus]              compact the current session
-  /permissions                  show repository permission rules
-  /mode ask|auto|readonly       choose approval behavior
-  /model <name> [effort]        change model and reasoning effort
-  /tools                        list tools
-  /skills                       list discovered Skills
-  /skill <name>                 activate a Skill
-  /approve once|always|deny     resolve a pending approval
-  /steer [now] <instruction>    correct a running turn
-  /new                          start a new session
-  /resume [session_id]          resume a session
-  /sessions                     list sessions
-  /rename <name>                rename the current session
-  /clear                        clear the active session from the UI
-  /stop                         stop the active turn at a safe boundary
-  /quit                         exit
-"""
+HELP_TEXT = command_help_text()
 
 
 class InnoAgentCLI:

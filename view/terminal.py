@@ -13,7 +13,8 @@ from typing import Any
 
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.application import run_in_terminal
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion, CompleteEvent
+from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText, StyleAndTextTuples
 from prompt_toolkit.input.base import Input
 from prompt_toolkit.key_binding import KeyBindings
@@ -22,17 +23,13 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.output.base import Output
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.utils import get_cwidth
 
+from core import __version__
+from view.commands import COMMAND_SPECS
 from view.tui_render import present_event
 from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
-
-COMMANDS = [
-    "/help", "/status", "/context", "/goal", "/plan", "/tasks",
-    "/compact", "/permissions", "/mode", "/model", "/tools", "/skills",
-    "/skill", "/approve", "/steer", "/new", "/resume", "/sessions",
-    "/rename", "/clear", "/stop", "/quit",
-]
 
 MAX_TRANSCRIPT_CHARS = 120_000
 
@@ -40,6 +37,28 @@ MAX_TRANSCRIPT_CHARS = 120_000
 SubmitHandler = Callable[[str], Awaitable[None] | None]
 StateProvider = Callable[[], dict[str, Any]]
 PrintOperation = tuple[StyleAndTextTuples, str]
+
+
+class SlashCommandCompleter(Completer):
+    """Complete known slash commands by prefix and show concise descriptions."""
+
+    def get_completions(
+        self,
+        document: Document,
+        complete_event: CompleteEvent,
+    ):
+        prefix = document.text_before_cursor
+        if not prefix.startswith("/") or any(char.isspace() for char in prefix):
+            return
+        for spec in COMMAND_SPECS:
+            command = f"/{spec.name}"
+            if command.startswith(prefix.lower()):
+                yield Completion(
+                    command,
+                    start_position=-len(prefix),
+                    display=command,
+                    display_meta=spec.description,
+                )
 
 
 class TerminalIO:
@@ -76,10 +95,10 @@ class TerminalIO:
             message=self._input_prompt,
             bottom_toolbar=self._bottom_toolbar,
             placeholder=self._placeholder,
-            completer=WordCompleter(COMMANDS, sentence=True),
+            completer=SlashCommandCompleter(),
             complete_while_typing=True,
             complete_style=CompleteStyle.COLUMN,
-            reserve_space_for_menu=4,
+            reserve_space_for_menu=10,
             enable_history_search=True,
             key_bindings=self._key_bindings(),
             style=TUI_STYLE,
@@ -199,15 +218,7 @@ class TerminalIO:
         self._effort = effort
         self._cwd = cwd
         self._mode = mode
-        subtitle = " · ".join(filter(None, [model, effort, self._display_path(cwd), mode]))
-        self._queue(
-            "block",
-            (
-                "agent",
-                "InnoAgent",
-                f"{subtitle}\nType a task or /help. Terminal scrollback remains selectable.",
-            ),
-        )
+        self._queue("startup", (model, effort, cwd))
 
     def output(self, value: str = "") -> None:
         self._queue("output", value)
@@ -281,6 +292,8 @@ class TerminalIO:
                 break
             if action == "block":
                 operations.extend(self._append_block(*payload))
+            elif action == "startup":
+                operations.extend(self._append_startup(*payload))
             elif action == "output":
                 operations.extend(self._append_output(str(payload)))
             elif action == "stream":
@@ -297,6 +310,49 @@ class TerminalIO:
                 self._stream_pending = ""
                 operations.append(([('', "\x1b[2J\x1b[H")], ""))
         return operations
+
+    def _append_startup(self, model: str, effort: str, cwd: str) -> list[PrintOperation]:
+        columns = self.session.app.output.get_size().columns
+        width = max(40, min(72, columns - 2))
+        inner_width = width - 2
+        effort_text = effort.strip()
+        model_text = (
+            model
+            if not effort_text or effort_text == "none"
+            else f"{model} · {effort_text}"
+        )
+
+        def fit(value: str) -> str:
+            available = inner_width - 4
+            if get_cwidth(value) <= available:
+                return value
+            tail = value
+            while tail and get_cwidth(tail) > available - 1:
+                tail = tail[1:]
+            return f"…{tail}"
+
+        def row(value: str, style: str) -> PrintOperation:
+            content = f"  {fit(value)}"
+            padding = " " * max(0, inner_width - get_cwidth(content))
+            return (
+                [
+                    ("class:startup.border", "│"),
+                    (style, content),
+                    ("", padding),
+                    ("class:startup.border", "│"),
+                ],
+                "\n",
+            )
+
+        border = "─" * inner_width
+        return [
+            ([("class:startup.border", f"╭{border}╮")], "\n"),
+            row(f">_ InnoAgent  (v{__version__})", "class:startup.title"),
+            row("", "class:startup.body"),
+            row(f"model      {model_text}", "class:startup.body"),
+            row(f"directory  {self._display_path(cwd)}", "class:startup.body"),
+            ([("class:startup.border", f"╰{border}╯")], "\n\n"),
+        ]
 
     def _append_output(self, value: str) -> list[PrintOperation]:
         text = value.strip()

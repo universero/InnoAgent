@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.document import Document
+from prompt_toolkit.completion import CompleteEvent
 
 from core.runtime.agent import InnoAgentRuntime
 from core.runtime.config import RuntimeConfig
@@ -33,6 +35,26 @@ class CliTest(unittest.TestCase):
         self.assertEqual(command.args, ["confirm"])
         self.assertTrue(command_info("rename")["known"])
         self.assertTrue(command_info("steer")["known"])
+
+    def test_slash_completion_filters_by_prefix_and_shows_description(self) -> None:
+        ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
+        completer = ui.session.completer
+        self.assertIsNotNone(completer)
+
+        matches = list(
+            completer.get_completions(Document("/st", cursor_position=3), CompleteEvent())
+        )
+        self.assertEqual([item.text for item in matches], ["/status", "/steer", "/stop"])
+        self.assertTrue(all(item.display_meta_text for item in matches))
+        self.assertEqual(
+            list(
+                completer.get_completions(
+                    Document("/model gpt", cursor_position=10),
+                    CompleteEvent(),
+                )
+            ),
+            [],
+        )
 
     def test_non_tty_uses_plain_input_without_prompt_toolkit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +134,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("Goal", toolbar)
         self.assertIn("Tasks 1/2", toolbar)
         self.assertNotIn("Ready", toolbar)
+        self.assertIn(">_ InnoAgent  (v0.1.0)", ui.transcript_text)
+        self.assertIn("model      gpt-test · medium", ui.transcript_text)
+        self.assertIn("directory  /tmp/InnoAgent", ui.transcript_text)
 
     def test_inline_tui_keeps_native_scrollback_and_text_selection(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
