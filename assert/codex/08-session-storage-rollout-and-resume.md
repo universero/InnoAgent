@@ -4,31 +4,70 @@
 
 持久化模块要在进程退出、客户端断连、版本升级和 thread fork 后恢复 Agent 语义，同时不尝试序列化不可恢复的 runtime 句柄。
 
-## 2. 三种状态表示
+## 2. 四种状态表示
 
-- 内存 Session：实时、含 task/channel/mutex，不可直接持久化。
-- rollout JSONL：按时间记录 session metadata、ResponseItem 和事件，是重放来源。
-- SQLite/thread store：面向 list/search/read/archive/project 的查询投影。
+- core `Session`：实时对象，持有 `SessionState`、event sender、active turn、input queue、services 等，不可整体序列化。
+- `SessionState.history: ContextManager`：当前模型上下文，保存 `ResponseItemEnvelope`，会过滤非 API item 并裁剪工具输出。
+- rollout JSONL：canonical append-only log，保存经 policy 选择的 `RolloutItem`，是恢复的权威来源。
+- SQLite/thread store 与 App Server `ThreadState`：分别服务跨进程查询投影和在线 UI 投影，不是模型上下文本身。
 
-三者不是副本。内存负责运行，rollout 负责因果历史，SQLite 负责索引和产品查询。
+四者不是副本。内存 Session 负责运行，`ContextManager` 负责下一次模型请求，rollout 负责因果历史，SQLite 和 `ThreadState` 负责产品查询与当前 turn 展示。
 
 核心对象包括 `RolloutRecorder`、`RolloutItem`、`ThreadStore`、`LiveThread`、thread/turn/item records 和 pagination cursor。存储 API 不暴露 Session mutex，而通过不可变记录和投影读取。
 
 ## 3. 写入链路
 
 ```text
-用户输入 / model item / tool output / lifecycle
-  -> Session record_conversation_items / send_event
-  -> rollout recorder 追加 JSONL
-  -> thread-store 更新 metadata/index
-  -> App Server 通知客户端
+ResponseItem 路径：
+用户输入 / model completed item / tool output / context update
+  -> Session::record_conversation_items
+  -> ContextManager::record_annotated_items
+  -> RolloutItem::ResponseItem
+  -> persistence policy
+  -> JSONL
+
+EventMsg 路径：
+turn/item/tool/approval/delta/lifecycle event
+  -> Session::send_event[_raw]
+  -> RolloutItem::EventMsg 候选
+  -> persistence policy 选择或丢弃
+  -> JSONL（若保留）
+  -> tx_event
+  -> App Server 投影
 ```
 
-只有已经越过语义提交点的 item 才应进入可恢复历史。流式 delta 是展示状态，完整 `ResponseItem` 才是重放基础。
+`record_prepared_conversation_items` 的顺序是先写内存 history，再尝试持久化 `ResponseItem`，最后发布 `RawResponseItem`。`send_event_raw_with_persistence` 则在发布 event channel 前先尝试持久化候选 `EventMsg`。两条链最终都调用 `LiveThread::append_items`，但只有通过 rollout policy 的记录才真正写入。
+
+`Session::persist_rollout_items` 会记录存储错误但不向上返回，因此这是“先尽力持久化，再发布”的顺序，不是事务提交。磁盘持续失败时，内存历史和客户端可见状态可能领先于 durable rollout。
 
 ## 4. rollout
 
-rollout 使用追加式记录，避免每次 turn 重写整个会话。记录包含 thread/session metadata、响应 item、compaction、配置变化和必要事件。追加模型适合崩溃恢复，但需要 schema version 和对未知 record 的兼容策略。
+rollout 使用追加式记录，避免每次 turn 重写整个会话。[RolloutLine](https://github.com/openai/codex/blob/694b6319d3ad2399f6e435760a22d9b9357f0697/codex-rs/history/src/lib.rs#L254) 包含 timestamp、单调 ordinal 和 flattened `RolloutItem`。记录类型包括：
+
+- `SessionMeta`、`ResponseItem`、inter-agent communication。
+- `Compacted`、`TurnContext`、`WorldState`、`RetainedContext`。
+- `TokenUsageRecord`、`SecurityRiskScore`。
+- 经 policy 选择的 `EventMsg`。
+- paginated history 使用的 `RealtimeItem`。
+
+`RolloutItemWire` 以 `type: snake_case` 和 `payload` 序列化。`ResponseItemEnvelope.metadata` 独立于 provider item 保存，使 resume 后仍能恢复 user input order、继承消息标记和 fallback truncation budget。
+
+### 4.1 持久化 policy
+
+统一入口 [is_persisted_rollout_item](https://github.com/openai/codex/blob/694b6319d3ad2399f6e435760a22d9b9357f0697/codex-rs/rollout/src/policy.rs#L10) 过滤记录：
+
+- `ResponseItem` 保存消息、reasoning、工具调用/输出、配置和 compaction；丢弃临时 `AdditionalTools`、`CompactionTrigger`、`Other`。
+- turn started/complete/aborted、token count、goal、rollback、settings applied 始终保存。
+- delta、approval request、stream error、raw response、tool begin 等瞬态事件不保存。
+- Legacy 模式保存旧 message/reasoning/tool-end 事件；Paginated 模式改存 canonical `ItemCompleted(TurnItem)`。
+
+因此 rollout 不是 event channel 的全量抓包，而是恢复语义明确的 canonical log。
+
+### 4.2 writer 的 durable 语义
+
+`RolloutRecorder` 使用容量 256 的 mpsc command queue，支持 `AddItems`、`Persist`、`Flush`、`Shutdown`。LocalThreadStore 的 live writer 会先按 policy 过滤，再 `record_canonical_items + flush`，保证 append 返回前 JSONL 已 flush。
+
+writer 只从 pending queue 删除成功写入的前缀。第一次 I/O 失败后会丢弃旧 file handle、保留未写后缀、重新打开文件再试一次。Paginated 模式在 JSONL flush 成功后才 materialize SQLite，因此索引可以暂时落后，但不应领先于 canonical log。
 
 ## 5. ThreadStore 与 LiveThread
 
@@ -38,7 +77,20 @@ store 接口允许不同调用表面共享列表和搜索，不必各自扫描�
 
 ## 6. resume
 
-resume 读取 rollout 和 metadata，重建历史、配置基线和 thread identity，再创建新的 Session runtime。它不能恢复：
+resume 读取 rollout 和 metadata，逆向识别最新有效 compaction、turn segment 与 rollback，再正向重放幸存记录。重建规则不是“把每个 event 再发一遍”：
+
+- `ResponseItem` 重建 `ContextManager`。
+- `InterAgentCommunication` 转换为 model input。
+- `Compacted.replacement_history` 成为新的历史基线。
+- `ThreadRolledBack` 删除最近 N 个 user turn。
+- `TurnContext` 恢复 previous settings/reference context。
+- `WorldState` 从 full snapshot 开始应用 merge patch。
+- `TurnStarted/Complete/Aborted` 提供分段和终态边界。
+- 大多数其他 `EventMsg` 对模型历史无作用。
+
+安装到新 Session 前，历史还会重新执行图片/音频准备，然后通过 `replace_annotated_history` 恢复 `SessionState.history`、review/retained context、world-state baseline 和 auto-compaction window。
+
+它不能恢复：
 
 - 已断开的 SSE/WebSocket；
 - 内存中的 tool future；

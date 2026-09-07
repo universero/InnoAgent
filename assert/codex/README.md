@@ -16,7 +16,7 @@
 |---|---|---|
 | 系统边界 | 进程、crate 和产品表面如何映射为一套 Agent 平台 | [00-system-map-and-methodology.md](00-system-map-and-methodology.md) |
 | 运行时控制循环 | 用户输入如何变成一个可取消、可转向、可恢复的 turn | [01-agent-runtime-and-control-loop.md](01-agent-runtime-and-control-loop.md) |
-| 事件模型 | 模型、工具、生命周期事件如何定义、关联、流转和兼容 | [02-event-model-and-protocol-flow.md](02-event-model-and-protocol-flow.md) |
+| 事件模型 | 命令、模型流、领域事件如何定义、流转、投影并进入 Session/rollout | [02-event-model-and-protocol-flow.md](02-event-model-and-protocol-flow.md) |
 | 上下文工程 | 指令、环境、历史和工具结果如何组装、更新、裁剪、压缩 | [03-context-engineering-and-compaction.md](03-context-engineering-and-compaction.md) |
 | 模型客户端 | Responses 请求、SSE/WebSocket、重试和错误恢复如何工作 | [04-model-client-streaming-and-retry.md](04-model-client-streaming-and-retry.md) |
 | 工具体系 | 工具注册、分发、长输出、长文件、并发和失败如何治理 | [05-tool-system-and-output-governance.md](05-tool-system-and-output-governance.md) |
