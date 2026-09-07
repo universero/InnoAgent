@@ -288,10 +288,10 @@ uv run python main.py
 ╭────────────────────────────────────────────────────────────────╮
 │ › Ask InnoAgent to do anything                                 │
 ╰────────────────────────────────────────────────────────────────╯
- gpt-5 medium · ~/project · ask · 1,240 tokens · 42% ctx · Ready
+ gpt-5 · medium  │  ASK  ~/project  │  1,240 tokens · 42% context
 ```
 
-模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。输出区继承用户终端背景，蓝色输入框与深蓝底栏只占底部交互区域。底栏展示模型、工作区、权限模式、累计 token、上下文比例、Goal、任务进度和活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
+模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。输出区继承用户终端背景，两行高的蓝色输入框与深蓝底栏固定在底部交互区域。底栏分组展示模型、模式、工作区、累计 token、上下文比例、Goal 和任务进度；空闲时不显示冗余的 `Ready`，仅在执行、规划、反思或审批时显示活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
 
 快捷键：
 

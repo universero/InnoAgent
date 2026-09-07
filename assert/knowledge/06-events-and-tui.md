@@ -148,7 +148,7 @@ flowchart TB
 
 ### 输入与底栏
 
-Prompt 使用浅蓝局部背景和三种输入语义。PromptSession 在终端底部保留输入框与状态栏，后台事件通过 `run_in_terminal()` 写入其上方后恢复输入焦点：
+Prompt 使用两行高的浅蓝局部背景和三种输入语义。PromptSession 在终端底部保留输入框与状态栏，后台事件通过 `run_in_terminal()` 写入其上方后恢复输入焦点：
 
 - 空闲：`›`，接受任务或 Slash 命令。
 - 执行中：`steer ›`，接受纠偏或 `/stop`。
@@ -160,7 +160,7 @@ Prompt 使用浅蓝局部背景和三种输入语义。PromptSession 在终端�
 - 当前工作区和权限模式。
 - 累计 token 与 context 百分比。
 - Goal 是否存在与 Task 完成数。
-- Ready、Thinking、Planning、Reflecting 或 Approval required。
+- Thinking、Planning、Reflecting 或 Approval required；空闲 `Ready` 不显示。
 
 信息保持单行，窄终端由 prompt_toolkit 自然裁剪；详细 Goal、Plan 和 Task 通过 Slash 命令查看，避免重新引入常驻侧栏。
 

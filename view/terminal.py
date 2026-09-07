@@ -17,6 +17,7 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText, StyleAndTextTuples
 from prompt_toolkit.input.base import Input
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Dimension
 from prompt_toolkit.output.base import Output
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import CompleteStyle
@@ -91,6 +92,7 @@ class TerminalIO:
         # PromptSession 没有公开的输入窗口样式参数，只给当前输入窗口绑定局部主题，
         # 避免通过默认样式给整个终端空白区域着色。
         self.session.app.layout.current_window.style = "class:input"
+        self.session.app.layout.current_window.height = Dimension.exact(2)
 
     @property
     def transcript_text(self) -> str:
@@ -415,24 +417,33 @@ class TerminalIO:
         goal = state.get("goal") or snapshot.get("goal")
         tasks = state.get("tasks") or []
         completed_tasks = sum(1 for task in tasks if task.get("status") == "done")
-        progress = ""
-        if goal:
-            progress += "  ·  goal"
-        if tasks:
-            progress += f"  ·  {completed_tasks}/{len(tasks)} tasks"
-        activity_style = "class:toolbar.busy" if self._busy else "class:toolbar.ready"
-        return [
+        effort = self._effort.strip()
+        activity = self._activity.strip()
+        fragments: StyleAndTextTuples = [
             ("class:toolbar.model", f" {model}"),
-            ("class:toolbar", f" {self._effort}" if self._effort else ""),
-            ("class:toolbar", "  ·  "),
-            ("class:toolbar.path", self._display_path(self._cwd)),
-            (
-                "class:toolbar",
-                f"  ·  {mode}  ·  {tokens:,} tokens  ·  {percent:.0f}% ctx{progress}  ·  ",
-            ),
-            (activity_style, self._activity),
-            ("class:toolbar", " "),
+            ("class:toolbar.model", f" · {effort}" if effort and effort != "none" else ""),
+            ("class:toolbar.separator", "  │  "),
+            ("class:toolbar.mode", f" {mode.upper()} "),
+            ("class:toolbar.path", f"  {self._display_path(self._cwd)}"),
+            ("class:toolbar.separator", "  │  "),
+            ("class:toolbar.metric", f"{tokens:,} tokens  ·  {percent:.0f}% context"),
         ]
+        if goal:
+            fragments.append(("class:toolbar.progress", "  ·  Goal"))
+        if tasks:
+            fragments.append(
+                ("class:toolbar.progress", f"  ·  Tasks {completed_tasks}/{len(tasks)}")
+            )
+        # Ready 只是空闲默认值，不占用有限的状态栏空间。
+        if activity and activity.casefold() != "ready":
+            fragments.extend(
+                [
+                    ("class:toolbar.separator", "  │  "),
+                    ("class:toolbar.activity", f" {activity} "),
+                ]
+            )
+        fragments.append(("class:toolbar", " "))
+        return fragments
 
     def _safe_snapshot(self) -> dict[str, Any]:
         try:

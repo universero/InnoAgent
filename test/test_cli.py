@@ -106,9 +106,11 @@ class CliTest(unittest.TestCase):
         self.assertIn("↳ Tool · read", ui.transcript_text)
         self.assertIn("✓ read · success", ui.transcript_text)
         toolbar = "".join(text for _, text in ui._bottom_toolbar())
-        self.assertIn("42% ctx", toolbar)
-        self.assertIn("goal", toolbar)
-        self.assertIn("1/2 tasks", toolbar)
+        self.assertIn("ASK", toolbar)
+        self.assertIn("42% context", toolbar)
+        self.assertIn("Goal", toolbar)
+        self.assertIn("Tasks 1/2", toolbar)
+        self.assertNotIn("Ready", toolbar)
 
     def test_inline_tui_keeps_native_scrollback_and_text_selection(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
@@ -118,6 +120,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(ui.session.app.erase_when_done)
         self.assertIsNotNone(ui.session.bottom_toolbar)
         self.assertEqual(ui.session.app.layout.current_window.style, "class:input")
+        self.assertEqual(ui.session.app.layout.current_window.height.preferred, 2)
 
     def test_inline_tui_uses_local_blue_theme_without_global_background(self) -> None:
         rules = dict(TUI_STYLE.style_rules)
@@ -126,6 +129,16 @@ class CliTest(unittest.TestCase):
         self.assertIn("#2563eb", rules["prompt"])
         self.assertIn("#60a5fa", rules["frame.border"])
         self.assertIn("#0f2747", rules["bottom-toolbar"])
+
+    def test_inline_tui_only_shows_meaningful_activity(self) -> None:
+        ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
+
+        idle_toolbar = "".join(text for _, text in ui._bottom_toolbar())
+        self.assertNotIn("Ready", idle_toolbar)
+
+        ui.set_busy(True, "Thinking")
+        busy_toolbar = "".join(text for _, text in ui._bottom_toolbar())
+        self.assertIn("Thinking", busy_toolbar)
 
     def test_tui_approval_changes_input_mode(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
