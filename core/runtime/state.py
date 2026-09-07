@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
     user_input: str
     context: str
     _runtime_context: str
+    _model_messages: list[dict[str, Any]]
     messages: list[dict[str, Any]]
 
     next_action: NextAction
@@ -40,12 +41,14 @@ class AgentState(TypedDict, total=False):
     approved_tool_calls: list[dict[str, Any]]
     denied_tool_calls: list[dict[str, Any]]
     pending_tool_calls: list[dict[str, Any]]
+    deferred_tool_calls: list[dict[str, Any]]
 
     active_skills: list[dict[str, Any]]
     steering_history: list[dict[str, Any]]
     context_summary: str
     context_usage: dict[str, Any]
     usage: dict[str, int]
+    last_response_usage: dict[str, int]
     stage: str
     finish_reason: str | None
     _last_tool_signature: str
@@ -55,6 +58,45 @@ class AgentState(TypedDict, total=False):
     errors: list[dict[str, Any]]
     pending_confirmation: dict[str, Any] | None
     pending_user_question: dict[str, Any] | None
+
+
+def reset_turn_scope(state: dict[str, Any]) -> None:
+    """开始新 turn 时清除瞬态执行数据，保留会话与计划上下文。"""
+    state.update(
+        goal_complete=False,
+        reflection=None,
+        reflection_count=0,
+        response="",
+        streamed_response="",
+        context="",
+        _runtime_context="",
+        _model_messages=[],
+        tool_calls=[],
+        tool_results=[],
+        approved_tool_calls=[],
+        denied_tool_calls=[],
+        pending_tool_calls=[],
+        deferred_tool_calls=[],
+        pending_confirmation=None,
+        pending_user_question=None,
+        errors=[],
+        next_action="continue",
+        finished=False,
+        stage="main",
+        finish_reason=None,
+        _last_tool_signature="",
+    )
+
+
+def reset_goal_scope(state: dict[str, Any], goal: str | None) -> None:
+    """切换或重新执行 Goal 时，清除只属于旧目标的执行证据。"""
+    reset_turn_scope(state)
+    state.update(
+        goal=goal,
+        plan=None,
+        tasks=[],
+        plan_mode=False,
+    )
 
 
 def initial_state(
@@ -93,11 +135,20 @@ def initial_state(
         approved_tool_calls=[],
         denied_tool_calls=[],
         pending_tool_calls=[],
+        deferred_tool_calls=[],
         active_skills=[],
         steering_history=[],
         context_summary="",
         context_usage={},
-        usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "requests": 0,
+        },
+        last_response_usage={},
         stage="main",
         finish_reason=None,
         _last_tool_signature="",

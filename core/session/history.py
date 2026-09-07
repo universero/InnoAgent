@@ -11,12 +11,22 @@ from pydantic import BaseModel, Field
 class Message(BaseModel):
     """A single persisted chat message."""
     role: str
-    content: str
+    content: str = ""
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    tool_call_id: str | None = None
+    name: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, Any]:
         """Return the OpenAI-compatible message shape."""
-        return {"role": self.role, "content": self.content}
+        result: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.tool_calls:
+            result["tool_calls"] = [dict(call) for call in self.tool_calls]
+        if self.tool_call_id:
+            result["tool_call_id"] = self.tool_call_id
+        if self.name:
+            result["name"] = self.name
+        return result
 
 
 class SessionHistory:
@@ -40,9 +50,9 @@ class SessionHistory:
         """Remove all messages."""
         self.messages.clear()
 
-    def to_openai_messages(self, system_prompt: str | None = None) -> list[dict[str, str]]:
+    def to_openai_messages(self, system_prompt: str | None = None) -> list[dict[str, Any]]:
         """Convert history into an OpenAI-style message list."""
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(message.as_dict() for message in self.tail())
@@ -53,7 +63,13 @@ class SessionHistory:
         """Build history from persisted message dicts."""
         return cls(
             [
-                Message(role=str(item.get("role", "user")), content=str(item.get("content", "")))
+                Message(
+                    role=str(item.get("role", "user")),
+                    content=str(item.get("content", "")),
+                    tool_calls=list(item.get("tool_calls") or []),
+                    tool_call_id=(str(item["tool_call_id"]) if item.get("tool_call_id") else None),
+                    name=(str(item["name"]) if item.get("name") else None),
+                )
                 for item in messages
             ]
         )

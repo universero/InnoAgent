@@ -83,7 +83,8 @@ class ModelStreamConsumer:
             elif event.type == "response.failed":
                 error = str(event.payload.get("error") or event.finish_reason or "model failed")
 
-        calls = [self._complete_call(call_id, part) for call_id, part in sorted(call_parts.items())]
+        # dict 保留 provider 首次发出调用的顺序；call_id 只用于关联，不能用于调度排序。
+        calls = [self._complete_call(call_id, part) for call_id, part in call_parts.items()]
         return ModelBatch(
             text="".join(text_parts).strip() or completed_text.strip(),
             calls=calls,

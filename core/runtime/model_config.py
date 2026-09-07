@@ -142,27 +142,15 @@ class ModelConfigLoader:
             path = self.project_config_path
             source = "project"
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "api_key": api_key,
-                    "base_url": base_url,
-                    "model": model,
-                    "reasoning_effort": "none",
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return ModelConfig(
+        config = ModelConfig(
             api_key=api_key,
             base_url=base_url,
             model=model,
             reasoning_effort="none",
             source=source,
         )
+        self.save(config, scope=source)
+        return config
 
     def _read_secret(self, prompt: str) -> str:
         """Read an API key, hiding input when attached to a terminal."""
@@ -174,8 +162,17 @@ class ModelConfigLoader:
         """将模型配置写入项目或全局配置文件。"""
         path = self.project_config_path if scope != "global" else self.global_config_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, object] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, json.JSONDecodeError):
+                pass
+        existing.update(config.to_dict())
         path.write_text(
-            json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
+            json.dumps(existing, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         return path

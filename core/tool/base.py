@@ -13,22 +13,79 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class ToolCall(BaseModel):
     """A validated request to execute one tool."""
 
-    id: str
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    call_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("call_id", "id"),
+    )
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def id(self) -> str:
+        """Compatibility alias used by older callers."""
+        return self.call_id
+
+
+class ToolSpec(BaseModel):
+    """Model contract plus trusted local execution capabilities."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    is_write: bool = False
+    requires_confirmation: bool = False
+    parallel_safe: bool = True
+
+
+ToolAuthorizationStatus = Literal[
+    "allowed",
+    "needs_confirmation",
+    "blocked",
+    "error",
+]
+ToolResultStatus = Literal["success", "error", "needs_confirmation", "blocked"]
+
+
+class ToolAuthorization(BaseModel):
+    """Pre-execution policy result; approval is not a tool output."""
+
+    tool_name: str
+    status: ToolAuthorizationStatus
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def allowed(self) -> bool:
+        return self.status == "allowed"
+
+    def to_result(self) -> "ToolResult":
+        result_status: ToolResultStatus = "error"
+        if self.status == "needs_confirmation":
+            result_status = "needs_confirmation"
+        elif self.status == "blocked":
+            result_status = "blocked"
+        return ToolResult(
+            tool_name=self.tool_name,
+            status=result_status,
+            output=self.reason,
+            metadata=dict(self.metadata),
+        )
 
 
 class ToolResult(BaseModel):
     """Uniform result returned by every tool execution."""
 
     tool_name: str
-    status: Literal["success", "error", "needs_confirmation", "blocked"]
+    status: ToolResultStatus
     output: str = ""
     data: Any = None
     warnings: list[str] = Field(default_factory=list)
@@ -78,11 +135,15 @@ class ToolContext:
     services: dict[str, Any] = field(default_factory=dict)
 
     def resolve_path(self, path: str) -> Path:
-        """Resolve relative paths against the first allowed workspace root."""
+        """Resolve a path and enforce the allowed-root boundary at execution time."""
         candidate = Path(path).expanduser()
         if not candidate.is_absolute() and self.allowed_roots:
             candidate = Path(self.allowed_roots[0]) / candidate
-        return candidate.resolve()
+        resolved = candidate.resolve()
+        roots = [Path(root).expanduser().resolve() for root in self.allowed_roots]
+        if roots and not any(root == resolved or root in resolved.parents for root in roots):
+            raise ValueError(f"path is outside allowed roots: {resolved}")
+        return resolved
 
 
 class BaseTool(ABC):
@@ -103,6 +164,17 @@ class BaseTool(ABC):
         Subclasses may override this to include live plan/task state.
         """
         return self.description
+
+    def spec(self, context: ToolContext | None = None) -> ToolSpec:
+        """Return the model schema and immutable scheduling capabilities."""
+        return ToolSpec(
+            name=self.name,
+            description=self.dynamic_description(context),
+            parameters=self.input_model.model_json_schema(),
+            is_write=self.is_write,
+            requires_confirmation=self.requires_confirmation,
+            parallel_safe=self.parallel_safe,
+        )
 
     def validate(self, arguments: dict[str, Any]) -> BaseModel:
         """Coerce and validate raw tool arguments."""

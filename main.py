@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from core.agent.react import EventDrivenAgent
-from core.runtime.config import RuntimeConfig
+from core.runtime.config import RuntimeConfig, RuntimeConfigStore
 from core.llm import OpenAICompatibleModel
 from core.runtime.model_config import ModelConfigLoader
 from view.cli import InnoAgentCLI
@@ -11,10 +11,12 @@ from view.cli import InnoAgentCLI
 
 def main() -> None:
     """Load model config, build the runtime and start the CLI."""
-    config = RuntimeConfig(
-        workspace_root=".",
-        mode="ask",
-        max_iterations=20,
+    config = RuntimeConfigStore(".").load(
+        RuntimeConfig(
+            workspace_root=".",
+            mode="ask",
+            max_iterations=20,
+        )
     )
     model_config = ModelConfigLoader(project_root=config.workspace_root).load()
     model = OpenAICompatibleModel(

@@ -11,6 +11,7 @@ from pathlib import Path
 from core.runtime.agent import InnoAgentRuntime
 from core.runtime.config import RuntimeConfig
 from core.session.store import SessionRecord, SessionStore
+from core.tool.approval import ApprovalRequest
 from test.fakes import FakeModel
 
 
@@ -33,6 +34,44 @@ class SessionTest(unittest.TestCase):
             runtime = self._runtime(tmp)
             _, session_id = runtime.new_state("hello")
             self.assertRegex(session_id, r"^\d{8}-\d{6}-\d{6}$")
+
+    def test_event_only_replay_aggregates_response_api_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="usage-session"))
+            store.append_events(
+                "usage-session",
+                [
+                    {
+                        "type": "response.completed",
+                        "stage": "main",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 4,
+                            "total_tokens": 14,
+                            "cached_tokens": 3,
+                            "reasoning_tokens": 2,
+                        },
+                    },
+                    {
+                        "type": "response.completed",
+                        "stage": "reflect",
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 2,
+                            "total_tokens": 8,
+                        },
+                    },
+                ],
+            )
+
+            state = store.load_state("usage-session")
+
+            self.assertEqual(state["usage"]["input_tokens"], 16)
+            self.assertEqual(state["usage"]["total_tokens"], 22)
+            self.assertEqual(state["usage"]["requests"], 2)
+            self.assertEqual(state["context_usage"]["used_tokens"], 10)
+            self.assertEqual(state["context_usage"]["source"], "response_api")
 
     def test_rename_is_preserved_after_continue(self) -> None:
         """Verify renamed sessions retain their name."""
@@ -191,6 +230,232 @@ class SessionTest(unittest.TestCase):
 
             self.assertEqual(messages[1]["tool_calls"][0]["call_id"], "call_read")
             self.assertEqual(messages[2]["tool_call_id"], "call_read")
+
+    def test_event_only_replay_resets_evidence_when_goal_restarts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="goal-replay", goal="旧目标"))
+            store.append_events(
+                "goal-replay",
+                [
+                    {
+                        "type": "item.completed",
+                        "item_type": "plan",
+                        "payload": {
+                            "plan": {"status": "active"},
+                            "tasks": [{"task_id": "old", "status": "done"}],
+                        },
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "tool_result",
+                        "tool_name": "write",
+                        "payload": {
+                            "result": {"tool_name": "write", "status": "success"}
+                        },
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "reflection",
+                        "payload": {"complete": True, "feedback": "旧结论"},
+                    },
+                    {
+                        "type": "turn.started",
+                        "payload": {
+                            "user_input": "新目标",
+                            "goal": "新目标",
+                            "goal_restarted": True,
+                        },
+                    },
+                ],
+            )
+
+            state = store.load_state("goal-replay")
+
+            self.assertEqual(state["goal"], "新目标")
+            self.assertIsNone(state["plan"])
+            self.assertEqual(state["tasks"], [])
+            self.assertIsNone(state["reflection"])
+            self.assertFalse(state["goal_complete"])
+            self.assertEqual(state["tool_results"], [])
+
+    def test_event_only_replay_restores_usage_tasks_and_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="state-replay"))
+            plan = {"plan_id": "plan-1", "goal": "ship", "steps": []}
+            tasks = [{"task_id": "task-1", "status": "in_progress"}]
+            skill = {"name": "review", "content": "review carefully"}
+            store.append_events(
+                "state-replay",
+                [
+                    {
+                        "type": "turn.started",
+                        "payload": {"user_input": "ship", "goal": "ship"},
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "tool_result",
+                        "tool_name": "task",
+                        "payload": {
+                            "result": {
+                                "tool_name": "task",
+                                "status": "success",
+                                "data": {"plan": plan, "tasks": tasks},
+                            }
+                        },
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "tool_result",
+                        "tool_name": "skill",
+                        "payload": {
+                            "result": {
+                                "tool_name": "skill",
+                                "status": "success",
+                                "data": {"active_skill": skill},
+                            }
+                        },
+                    },
+                    {
+                        "type": "turn.completed",
+                        "payload": {
+                            "finish_reason": "goal_complete",
+                            "goal_complete": True,
+                            "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11},
+                            "context_usage": {"used_tokens": 100, "percent_used": 10.0},
+                        },
+                    },
+                ],
+            )
+
+            state = store.load_state("state-replay")
+
+            self.assertEqual(state["plan"], plan)
+            self.assertEqual(state["tasks"], tasks)
+            self.assertEqual(state["active_skills"], [skill])
+            self.assertEqual(state["usage"]["total_tokens"], 11)
+            self.assertEqual(state["context_usage"]["used_tokens"], 100)
+            self.assertTrue(state["goal_complete"])
+
+    def test_events_after_last_checkpoint_are_replayed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="checkpoint-tail"))
+            store.append_events(
+                "checkpoint-tail",
+                [
+                    {
+                        "type": "state.checkpoint",
+                        "state": {
+                            "session_id": "checkpoint-tail",
+                            "messages": [{"role": "user", "content": "before"}],
+                            "goal": None,
+                        },
+                    },
+                    {
+                        "type": "turn.started",
+                        "payload": {"user_input": "after", "goal": None},
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "message",
+                        "payload": {"content": "persisted before crash"},
+                    },
+                    {
+                        "type": "turn.failed",
+                        "payload": {"error": "network disconnected"},
+                    },
+                ],
+            )
+
+            state = store.load_state("checkpoint-tail")
+
+            self.assertEqual(state["messages"][-2]["content"], "after")
+            self.assertEqual(state["messages"][-1]["content"], "persisted before crash")
+            self.assertEqual(state["finish_reason"], "error")
+            self.assertEqual(state["errors"][-1]["error"], "network disconnected")
+
+    def test_legacy_approval_event_replays_as_resumable_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="approval-replay"))
+            store.append_events(
+                "approval-replay",
+                [
+                    {
+                        "type": "needs_confirmation",
+                        "call_id": "legacy-write",
+                        "tool_name": "write",
+                        "arguments": {"path": "note.txt", "content": "hello"},
+                        "output": "write requires approval",
+                    }
+                ],
+            )
+
+            state = store.load_state("approval-replay")
+
+            self.assertEqual(state["pending_tool_calls"][0]["call_id"], "legacy-write")
+            self.assertEqual(
+                state["pending_confirmation"]["options"],
+                ["allow_once", "allow_always", "deny"],
+            )
+
+    def test_approval_event_replays_deferred_tool_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="approval-tail"))
+            store.append_events(
+                "approval-tail",
+                [
+                    {
+                        "type": "approval.requested",
+                        "payload": ApprovalRequest.from_calls(
+                            [
+                                {
+                                    "call_id": "write-1",
+                                    "name": "write",
+                                    "arguments": {"path": "note.txt", "content": "new"},
+                                }
+                            ],
+                            deferred_calls=[
+                                {
+                                    "call_id": "read-1",
+                                    "name": "read",
+                                    "arguments": {"path": "note.txt"},
+                                }
+                            ],
+                        ).as_payload(),
+                    }
+                ],
+            )
+
+            state = store.load_state("approval-tail")
+
+            self.assertEqual(state["pending_tool_calls"][0]["name"], "write")
+            self.assertEqual(state["deferred_tool_calls"][0]["name"], "read")
+
+    def test_runtime_can_resume_a_legacy_approval_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._runtime(tmp)
+            session_id = "legacy-approval-runtime"
+            runtime.session_store.create(SessionRecord(session_id=session_id, mode="ask"))
+            runtime.session_store.append_events(
+                session_id,
+                [
+                    {
+                        "type": "needs_confirmation",
+                        "call_id": "legacy-write",
+                        "tool_name": "write",
+                        "arguments": {"path": "note.txt", "content": "hello"},
+                        "output": "write requires approval",
+                    }
+                ],
+            )
+
+            runtime.resolve_approval(session_id, "allow_once")
+
+            self.assertEqual(Path(tmp, "note.txt").read_text(encoding="utf-8"), "hello")
 
 
 if __name__ == "__main__":

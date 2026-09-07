@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 from pydantic import Field
@@ -53,25 +54,29 @@ class GrepTool(BaseTool):
                 output=f"路径不存在: {root}",
             )
         try:
-            output = self._ripgrep(root, args)
+            lines, truncated = self._ripgrep(root, args, context)
         except FileNotFoundError:
-            output = self._fallback_grep(root, args)
-        lines = output.splitlines()
-        selected = lines[: args["max_results"]]
+            lines, truncated = self._fallback_grep(root, args, context)
         return ToolResult(
             tool_name=self.name,
             status="success",
-            output="\n".join(selected) or "无匹配结果",
-            warnings=["搜索结果已截断"] if len(lines) > len(selected) else [],
+            output="\n".join(lines) or "无匹配结果",
+            warnings=["搜索结果已截断"] if truncated else [],
             metadata={
                 "path": str(root),
                 "pattern": args["pattern"],
-                "match_count": len(lines),
-                "returned_count": len(selected),
+                "match_count": len(lines) + (1 if truncated else 0),
+                "returned_count": min(len(lines), args["max_results"]),
+                "truncated": truncated,
             },
         )
 
-    def _ripgrep(self, root: Path, args: dict) -> str:
+    def _ripgrep(
+        self,
+        root: Path,
+        args: dict,
+        context: ToolContext,
+    ) -> tuple[list[str], bool]:
         """Run ripgrep if available."""
         command = ["rg", "--line-number", "--no-heading"]
         if args.get("ignore_case"):
@@ -81,12 +86,14 @@ class GrepTool(BaseTool):
         if args.get("glob"):
             command.extend(["--glob", args["glob"]])
         command.extend(["--", args["pattern"], str(root)])
-        result = subprocess.run(command, text=True, capture_output=True)
-        if result.returncode not in {0, 1}:
-            raise OSError(result.stderr.strip())
-        return result.stdout.strip()
+        return self._run_bounded(command, args["max_results"], context)
 
-    def _fallback_grep(self, root: Path, args: dict) -> str:
+    def _fallback_grep(
+        self,
+        root: Path,
+        args: dict,
+        context: ToolContext,
+    ) -> tuple[list[str], bool]:
         """Run grep when ripgrep is unavailable."""
         command = ["grep", "-rn"]
         if args.get("ignore_case"):
@@ -96,7 +103,47 @@ class GrepTool(BaseTool):
         if args.get("glob"):
             command.extend(["--include", args["glob"]])
         command.extend(["--", args["pattern"], str(root)])
-        result = subprocess.run(command, text=True, capture_output=True)
-        if result.returncode not in {0, 1}:
-            raise OSError(result.stderr.strip())
-        return result.stdout.strip()
+        return self._run_bounded(command, args["max_results"], context)
+
+    @staticmethod
+    def _run_bounded(
+        command: list[str],
+        max_results: int,
+        context: ToolContext,
+    ) -> tuple[list[str], bool]:
+        """Drain search output incrementally and stop after the configured limits."""
+        max_chars = int(context.services.get("max_tool_output_chars", 30000))
+        lines: list[str] = []
+        chars = 0
+        truncated = False
+        with tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+            )
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.rstrip("\r\n")
+                if len(lines) >= max_results:
+                    truncated = True
+                    process.terminate()
+                    break
+                separator = 1 if lines else 0
+                remaining = max(0, max_chars - chars - separator)
+                if len(line) > remaining:
+                    if remaining:
+                        lines.append(line[:remaining])
+                    truncated = True
+                    process.terminate()
+                    break
+                lines.append(line)
+                chars += len(line) + separator
+            return_code = process.wait()
+            process.stdout.close()
+            if not truncated and return_code not in {0, 1}:
+                stderr_file.seek(0)
+                error = stderr_file.read(4096).decode("utf-8", errors="replace").strip()
+                raise OSError(error or f"search exited with code {return_code}")
+        return lines, truncated

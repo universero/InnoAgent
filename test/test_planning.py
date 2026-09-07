@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
+from core.agent.stages import StageRunner
 from core.planning.planner import PlanningService
 from core.planning.schemas import PlanningRequest, PlanStep
 from core.tool.base import ToolContext
@@ -26,6 +28,7 @@ class PlanningTest(unittest.TestCase):
         output.plan.steps[0].status = "done"
         updated = service.update_plan(PlanningRequest(goal="create and verify", existing_plan=output.plan))
         self.assertEqual(updated.plan.revision, 2)
+        self.assertEqual(updated.plan.plan_id, output.plan.plan_id)
         self.assertIn("done", [step.status for step in updated.plan.steps])
 
     def test_dependency_cycle_is_rejected(self) -> None:
@@ -48,6 +51,36 @@ class PlanningTest(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(result.data["plan"]["goal"], "create a file")
         self.assertGreaterEqual(len(result.data["tasks"]), 1)
+
+    def test_model_plan_rejects_unknown_dependencies(self) -> None:
+        runner = StageRunner.__new__(StageRunner)
+        payload = json.dumps(
+            {
+                "steps": [
+                    {"title": "implement", "depends_on": ["missing step"]},
+                ]
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown steps"):
+            runner._parse_plan(payload, "ship", None)
+
+    def test_model_plan_revision_preserves_plan_and_step_ids(self) -> None:
+        runner = StageRunner.__new__(StageRunner)
+        existing, _, _ = runner._parse_plan(
+            json.dumps({"steps": [{"title": "implement"}]}),
+            "ship",
+            None,
+        )
+        revised, _, _ = runner._parse_plan(
+            json.dumps({"steps": [{"title": "implement", "description": "revised"}]}),
+            "ship",
+            existing.model_dump(),
+        )
+
+        self.assertEqual(revised.plan_id, existing.plan_id)
+        self.assertEqual(revised.steps[0].step_id, existing.steps[0].step_id)
+        self.assertEqual(revised.revision, 2)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from core.agent.model_stream import ModelStreamConsumer
 from core.llm import OpenAICompatibleModel
 
 
@@ -140,11 +141,31 @@ class StreamingModelTest(unittest.TestCase):
             },
         )
 
+    def test_model_batch_preserves_provider_call_order_not_call_id_order(self) -> None:
+        lines = [
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"z-call","name":"write"}}',
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"path\\":\\"a.txt\\",\\"content\\":\\"new\\"}"}',
+            'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"a-call","name":"read"}}',
+            'data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\\"path\\":\\"a.txt\\"}"}',
+            'data: {"type":"response.completed"}',
+        ]
+        with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            batch = ModelStreamConsumer(model, lambda event: None).call(
+                "update then read",
+                {},
+                stage="main",
+                tool_schemas=[],
+            )
+
+        self.assertEqual([call["call_id"] for call in batch.calls], ["z-call", "a-call"])
+        self.assertEqual([call["name"] for call in batch.calls], ["write", "read"])
+
     def test_payload_replays_tool_calls_as_structured_response_items(self) -> None:
         lines = ['data: {"type":"response.completed"}']
         state = {
             "_runtime_context": "workspace: /tmp/project",
-            "messages": [
+            "_model_messages": [
                 {"role": "user", "content": "读 test.md"},
                 {
                     "role": "assistant",
@@ -179,6 +200,94 @@ class StreamingModelTest(unittest.TestCase):
         self.assertEqual(payload["input"][2]["call_id"], "call_read")
         self.assertEqual(payload["input"][3]["type"], "function_call_output")
         self.assertEqual(payload["input"][3]["call_id"], "call_read")
+
+    def test_payload_uses_only_context_builder_selected_messages(self) -> None:
+        state = {
+            "messages": [{"role": "user", "content": "old unbounded message"}],
+            "_model_messages": [{"role": "user", "content": "recent bounded message"}],
+            "_runtime_context": "active goal",
+        }
+
+        items = OpenAICompatibleModel._build_input("fallback", state)
+        serialized = json.dumps(items, ensure_ascii=False)
+
+        self.assertIn("recent bounded message", serialized)
+        self.assertIn("active goal", serialized)
+        self.assertNotIn("old unbounded message", serialized)
+
+    def test_event_stream_reads_text_and_reasoning_from_completed_body(self) -> None:
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [
+                            {
+                                "type": "reasoning",
+                                "summary": [{"type": "summary_text", "text": "检查完成"}],
+                            },
+                            {
+                                "type": "message",
+                                "content": [{"type": "output_text", "text": "最终答案"}],
+                            },
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+        ]
+        with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            events = list(model.stream_events("inspect", []))
+
+        completed = [event for event in events if event.type == "item.completed"]
+        self.assertEqual(
+            [(event.item_type, event.content) for event in completed],
+            [("reasoning", "检查完成"), ("message", "最终答案")],
+        )
+
+    def test_event_stream_reads_function_call_from_completed_body(self) -> None:
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "call_id": "call-read",
+                                "name": "read",
+                                "arguments": '{"path":"test.md"}',
+                            }
+                        ]
+                    },
+                }
+            )
+        ]
+        with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            events = list(model.stream_events("inspect", []))
+
+        call = next(event for event in events if event.item_type == "tool_call")
+        self.assertEqual(call.call_id, "call-read")
+        self.assertEqual(call.tool_name, "read")
+        self.assertEqual(call.arguments, {"path": "test.md"})
+
+    def test_reasoning_summary_delta_is_exposed(self) -> None:
+        lines = [
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"检查"}',
+            'data: {"type":"response.reasoning_summary_text.done","text":"检查完成"}',
+            'data: {"type":"response.completed"}',
+        ]
+        with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            events = list(model.stream_events("inspect", []))
+
+        self.assertEqual(events[0].item_type, "reasoning")
+        self.assertEqual(events[0].delta, "检查")
+        self.assertEqual(events[1].content, "检查完成")
 
     def test_event_stream_safely_normalizes_invalid_usage_values(self) -> None:
         lines = [

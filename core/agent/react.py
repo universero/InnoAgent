@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from threading import Lock
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 from core.agent.graph import MainAgentGraph
 from core.agent.model_stream import ModelBatch, ModelStreamConsumer
@@ -18,19 +18,24 @@ from core.memory.profile import ProfileStore
 from core.memory.recall import MemoryRecall
 from core.memory.thresholds import MemoryThresholds
 from core.memory.update import MemoryUpdater
-from core.runtime.config import RuntimeConfig
+from core.runtime.config import RuntimeConfig, RuntimeConfigStore
 from core.runtime.model_config import ModelConfig, ModelConfigLoader
-from core.runtime.state import AgentState, initial_state
-from core.session.compression import ContextCompactor, estimate_tokens
+from core.runtime.state import AgentState, initial_state, reset_goal_scope, reset_turn_scope
+from core.runtime.usage import accumulate_usage, normalize_usage
+from core.session.compression import ContextCompactor, estimate_message_tokens
 from core.session.context import ContextBuilder
 from core.session.history import SessionHistory
 from core.session.store import SessionRecord, SessionStore
 from core.skill.loader import SkillLoader
-from core.tool.base import ToolContext, ToolResult
+from core.tool.approval import (
+    VALID_APPROVAL_DECISIONS,
+    ApprovalDecision,
+    ApprovalRequest,
+)
+from core.tool.base import ToolAuthorization, ToolContext, ToolResult
 from core.tool.registry import ToolRegistry, tool_registry
 
 
-ApprovalDecision = Literal["allow_once", "allow_always", "deny"]
 _GOAL_UNSET = object()
 
 
@@ -73,6 +78,7 @@ class EventDrivenAgent:
         if model is None:
             raise ValueError("EventDrivenAgent requires a model client")
         self.config = config or RuntimeConfig()
+        self.runtime_config_store = RuntimeConfigStore(self.config.workspace_root)
         self.registry = _register_builtin_tools(registry or ToolRegistry())
         self.model = model
         self.stream_handler = stream_handler
@@ -147,10 +153,12 @@ class EventDrivenAgent:
         session_id: str | None = None,
         goal: str | None | object = _GOAL_UNSET,
         active_skills: list[dict[str, Any]] | None = None,
+        restart_goal: bool = False,
     ) -> AgentState:
         """Execute one user turn and persist replayable events."""
         new_session = session_id is None
         resolved_goal = goal if isinstance(goal, str) else None
+        goal_restarted = False
         if new_session:
             state, session_id = self.new_state(user_input, goal=resolved_goal)
             self.session_store.create(
@@ -165,8 +173,12 @@ class EventDrivenAgent:
             state = self.session_store.load_state(str(session_id))
             self._ensure_state_defaults(state)
             if goal is not _GOAL_UNSET:
-                state["goal"] = resolved_goal
-                state["goal_complete"] = False
+                goal_restarted = restart_goal or state.get("goal") != resolved_goal
+                if goal_restarted:
+                    reset_goal_scope(state, resolved_goal)
+                else:
+                    state["goal"] = resolved_goal
+            reset_turn_scope(state)
 
         if active_skills is not None:
             state["active_skills"] = self._merge_skills(
@@ -192,16 +204,37 @@ class EventDrivenAgent:
             self._emit(
                 AgentEvent(
                     type="turn.started",
-                    payload={"user_input": user_input, "goal": state.get("goal")},
+                    payload={
+                        "user_input": user_input,
+                        "goal": state.get("goal"),
+                        "goal_restarted": goal_restarted,
+                    },
                 )
             )
-            self._maybe_auto_compact(state)
             result = self._run_react(state)
             result["session_id"] = str(session_id)
             self._finish_turn(result)
             self._save_session(result)
             self.memory_updater.register_turn(user_input, str(result.get("response", "")))
             return result
+        except Exception as exc:
+            state["errors"] = list(state.get("errors", [])) + [
+                {"stage": str(state.get("stage") or "main"), "error": str(exc)}
+            ]
+            state["finished"] = True
+            state["finish_reason"] = "error"
+            try:
+                self._emit(
+                    AgentEvent(
+                        type="turn.failed",
+                        payload={"error": str(exc), "finish_reason": "error"},
+                    )
+                )
+                self._save_session(state)
+            except Exception:
+                # 保留原始异常；此前稳定事件已经尽可能逐条写入。
+                pass
+            raise
         finally:
             self._end_run()
 
@@ -224,8 +257,11 @@ class EventDrivenAgent:
 
         state["stage"] = "main"
         context = self._build_context(state)
+        if self._maybe_auto_compact(state):
+            context = str(state.get("context") or "")
         batch = self._call_model(context, state, stage="main")
         self._add_usage(state, batch.usage)
+        self._record_context_usage(state, batch.usage, stage="main")
         if batch.error:
             state["errors"] = list(state.get("errors", [])) + [
                 {"stage": "main", "error": batch.error}
@@ -368,20 +404,56 @@ class EventDrivenAgent:
 
     def _execute_tool_batch(self, state: AgentState, calls: list[dict[str, Any]]) -> bool:
         """Execute a model tool batch and return whether user interaction paused it."""
-        state["tool_calls"] = calls
+        normalized_calls: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+        pending_reasons: list[str] = []
+        deferred: list[dict[str, Any]] = []
+        runnable_calls: list[dict[str, Any]] = []
+        runnable_authorizations: list[ToolAuthorization] = []
+        runnable_indexes: list[int] = []
+        results: list[ToolResult | None] = [None] * len(calls)
+        for index, original_call in enumerate(calls):
+            authorization = self.registry.authorize_tool(
+                str(original_call.get("name") or ""),
+                dict(original_call.get("arguments") or {}),
+                self._tool_context(state),
+            )
+            call = {
+                **original_call,
+                "arguments": authorization.arguments,
+            }
+            normalized_calls.append(call)
+            if authorization.status == "needs_confirmation":
+                pending.append(call)
+                if authorization.reason:
+                    pending_reasons.append(authorization.reason)
+                # 审批是执行顺序屏障，后续调用必须等当前调用处理后再授权和执行。
+                deferred = [dict(item) for item in calls[index + 1 :]]
+                break
+            if not authorization.allowed:
+                results[index] = authorization.to_result()
+                continue
+            runnable_calls.append(call)
+            runnable_authorizations.append(authorization)
+            runnable_indexes.append(index)
+
+        state["tool_calls"] = [*normalized_calls, *deferred]
+
         # Registry 只并行无副作用调用，并按原始 call 顺序返回结果。
-        results = self.registry.execute_many(
-            calls,
+        completed = self.registry.execute_many(
+            runnable_calls,
             lambda: self._tool_context(state),
             max_workers=self.config.max_parallel_tools,
+            authorizations=runnable_authorizations,
         )
-        pending: list[dict[str, Any]] = []
+        for index, result in zip(runnable_indexes, completed):
+            results[index] = result
+
         pending_question: dict[str, Any] | None = None
-        for call, result in zip(calls, results):
-            self._emit_tool_result(call, result, stage=str(state.get("stage", "main")))
-            if result.status == "needs_confirmation":
-                pending.append(call)
+        for call, result in zip(normalized_calls, results):
+            if result is None:
                 continue
+            self._emit_tool_result(call, result, stage=str(state.get("stage", "main")))
             self._apply_tool_result(state, call, result)
             data = result.data if isinstance(result.data, dict) else {}
             question = data.get("user_question")
@@ -391,31 +463,31 @@ class EventDrivenAgent:
         state["approved_tool_calls"] = []
         if pending_question is not None:
             self._set_pending_user_question(state, pending_question)
-            return True
         if pending:
-            # 审批是可恢复的暂停点：先保存 pending calls，再由下一次输入续跑。
+            # 审批是可恢复暂停点，授权状态不能伪装成 tool result。
             state["pending_tool_calls"] = pending
-            first = pending[0]
-            state["pending_confirmation"] = {
-                "tool_name": first["name"],
-                "arguments": first.get("arguments") or {},
-                "calls": pending,
-                "options": ["allow_once", "allow_always", "deny"],
-            }
+            state["deferred_tool_calls"] = deferred
+            request = ApprovalRequest.from_calls(
+                pending,
+                deferred_calls=deferred,
+                reason="; ".join(dict.fromkeys(pending_reasons)),
+            )
+            state["pending_confirmation"] = request.as_payload()
             self._emit(
                 AgentEvent(
                     type="approval.requested",
                     item_type="approval",
-                    call_id=str(first.get("call_id") or ""),
-                    tool_name=str(first["name"]),
-                    arguments=dict(first.get("arguments") or {}),
-                    payload=dict(state["pending_confirmation"]),
-                    options=["allow_once", "allow_always", "deny"],
+                    call_id=request.calls[0].call_id,
+                    tool_name=request.tool_name,
+                    arguments=request.arguments,
+                    payload=request.as_payload(),
+                    options=[option.value for option in request.options],
                 )
             )
             state["finish_reason"] = "approval_required"
             return True
-        return False
+        state["deferred_tool_calls"] = []
+        return pending_question is not None
 
     def _set_pending_user_question(
         self,
@@ -490,11 +562,45 @@ class EventDrivenAgent:
 
     def resolve_approval(self, session_id: str, decision: ApprovalDecision) -> AgentState:
         """Resolve pending calls, optionally persist rules, then continue the loop."""
+        if decision not in VALID_APPROVAL_DECISIONS:
+            raise ValueError(f"invalid approval decision: {decision}")
         state = self.session_store.load_state(session_id)
         self._ensure_state_defaults(state)
-        pending = list(state.get("pending_tool_calls") or [])
+        pending_payload = dict(state.get("pending_confirmation") or {})
+        pending_calls = pending_payload.get("calls") or state.get("pending_tool_calls") or []
+        if pending_payload:
+            pending_payload["calls"] = pending_calls
+            request = ApprovalRequest.model_validate(pending_payload)
+        else:
+            request = None
+        pending = (
+            [call.model_dump() for call in request.calls]
+            if request is not None
+            else list(pending_calls)
+        )
+        deferred = (
+            [call.model_dump() for call in request.deferred_calls]
+            if request is not None and request.deferred_calls
+            else list(state.get("deferred_tool_calls") or [])
+        )
         if not pending:
             raise ValueError("session has no pending approval")
+        if request is not None and not request.accepts(decision):
+            raise ValueError(f"invalid approval decision: {decision}")
+        if decision != "deny":
+            normalized_pending: list[dict[str, Any]] = []
+            for call in pending:
+                normalized = dict(call)
+                try:
+                    normalized["arguments"] = self.registry.normalize_arguments(
+                        str(call.get("name") or ""),
+                        dict(call.get("arguments") or {}),
+                    )
+                except Exception as exc:
+                    # 旧审批在恢复时也必须重新通过当前 schema，不能持久化失效授权。
+                    raise ValueError(f"pending approval call is invalid: {exc}") from exc
+                normalized_pending.append(normalized)
+            pending = normalized_pending
         state["turn_id"] = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         self._begin_run(session_id, str(state["turn_id"]))
         try:
@@ -507,6 +613,7 @@ class EventDrivenAgent:
             )
             state["pending_tool_calls"] = []
             state["pending_confirmation"] = None
+            state["deferred_tool_calls"] = []
             state["tool_results"] = [
                 result
                 for result in state.get("tool_results", [])
@@ -523,6 +630,10 @@ class EventDrivenAgent:
                     )
                     self._emit_tool_result(call, result)
                     self._apply_tool_result(state, call, result)
+                if deferred and self._execute_tool_batch(state, deferred):
+                    self._finish_turn(state)
+                    self._save_session(state)
+                    return state
             else:
                 if decision == "allow_always":
                     # 持久授权只写入仓库级规则，仍受路径和只读模式约束。
@@ -532,7 +643,16 @@ class EventDrivenAgent:
                         )
                 else:
                     state["approved_tool_calls"] = pending
-                self._execute_tool_batch(state, pending)
+                if self._execute_tool_batch(state, [*pending, *deferred]):
+                    self._finish_turn(state)
+                    self._save_session(state)
+                    return state
+
+            if state.get("pending_user_question"):
+                state["finish_reason"] = "user_input_required"
+                self._finish_turn(state)
+                self._save_session(state)
+                return state
 
             if self._consume_stop_request(state, boundary="after_tool"):
                 self._finish_turn(state)
@@ -567,12 +687,18 @@ class EventDrivenAgent:
         finally:
             self._end_run()
 
-    def _maybe_auto_compact(self, state: AgentState) -> None:
+    def _maybe_auto_compact(self, state: AgentState) -> bool:
+        """Compact before a model request when projected context crosses the threshold."""
+        usage = state.get("context_usage") or {}
+        projected = int(usage.get("projected_tokens") or usage.get("estimated_tokens") or 0)
+        if projected < self.config.compact_threshold_tokens:
+            return False
         messages = SessionHistory.from_dicts(state.get("messages", [])).messages
-        tokens = sum(estimate_tokens(message.content) for message in messages)
-        reserve = min(self.config.compact_reserve_tokens, self.config.max_context_tokens // 4)
-        if tokens > self.config.max_context_tokens - reserve:
-            self._compact_state(state, trigger="auto")
+        history_tokens = sum(estimate_message_tokens(message) for message in messages)
+        if history_tokens <= self.config.compact_keep_recent_tokens:
+            return False
+        self._compact_state(state, trigger="auto")
+        return True
 
     def _compact_state(
         self,
@@ -587,14 +713,24 @@ class EventDrivenAgent:
                 type="context.compaction.started",
                 stage="compact",
                 item_type="compaction",
-                payload={"trigger": trigger},
+                payload={
+                    "trigger": trigger,
+                    "threshold_tokens": self.config.compact_threshold_tokens,
+                },
             )
         )
+        if self._uses_model_summarizer:
+            self.stages.last_usage = {}
         result = self.compactor.compact(messages, self.summarizer, focus=focus)
         if self._uses_model_summarizer:
             self._add_usage(state, self.stages.last_usage)
         state["messages"] = [message.as_dict() for message in result.messages]
-        state["context_summary"] = result.summary
+        if result.summary:
+            state["context_summary"] = result.summary
+        # 压缩改变了下一次请求体，旧的 API 实测值不再代表当前上下文。
+        state["context_usage"] = {}
+        self._build_context(state)
+        context_usage = dict(state.get("context_usage") or {})
         self._emit(
             AgentEvent(
                 type="context.compaction.completed",
@@ -602,10 +738,11 @@ class EventDrivenAgent:
                 item_type="compaction",
                 payload={
                     "trigger": trigger,
-                    "summary": result.summary,
+                    "summary": state.get("context_summary", ""),
                     "tokens_before": result.tokens_before,
                     "tokens_after": result.tokens_after,
                     "compression_ratio": result.compression_ratio,
+                    "context_usage": context_usage,
                 },
                 progress=1.0,
             )
@@ -617,6 +754,7 @@ class EventDrivenAgent:
             history=SessionHistory.from_dicts(state.get("messages", [])),
             profile=self.memory_recall.recall(str(state.get("user_id", "default"))),
             tool_schemas=self.registry.tool_schemas(self._tool_context(state)),
+            goal=state.get("goal"),
             plan=state.get("plan"),
             tasks=state.get("tasks", []),
             reflection_feedback=self._latest_reflection_feedback(state),
@@ -626,7 +764,43 @@ class EventDrivenAgent:
         )
         state["context"] = context
         state["_runtime_context"] = self.context_builder.last_runtime_context
-        state["context_usage"] = dict(self.context_builder.last_usage)
+        state["_model_messages"] = list(self.context_builder.last_messages)
+        estimated = dict(self.context_builder.last_usage)
+        previous = dict(state.get("context_usage") or {})
+        message_count = len(state.get("messages", []))
+        projected = int(estimated.get("used_tokens", 0))
+        if previous.get("source") == "response_api":
+            anchor = min(message_count, max(0, int(previous.get("message_count", 0))))
+            appended = SessionHistory.from_dicts(state.get("messages", [])[anchor:]).messages
+            projected = max(
+                projected,
+                int(previous.get("used_tokens", 0))
+                + sum(estimate_message_tokens(message) for message in appended),
+            )
+        max_tokens = self.config.max_context_tokens
+        threshold_tokens = self.config.compact_threshold_tokens
+        if previous.get("source") == "response_api":
+            used_tokens = int(previous.get("used_tokens", 0))
+            source = "response_api"
+        else:
+            used_tokens = projected
+            source = "estimated"
+        state["context_usage"] = {
+            **previous,
+            "used_tokens": used_tokens,
+            "estimated_tokens": int(estimated.get("used_tokens", 0)),
+            "projected_tokens": projected,
+            "max_tokens": max_tokens,
+            "remaining_tokens": max(0, max_tokens - used_tokens),
+            "percent_used": round(min(1.0, used_tokens / max(1, max_tokens)) * 100, 1),
+            "projected_percent": round(
+                min(1.0, projected / max(1, max_tokens)) * 100,
+                1,
+            ),
+            "threshold_tokens": threshold_tokens,
+            "threshold_percent": round(self.config.compact_threshold * 100, 1),
+            "source": source,
+        }
         return context
 
     def _tool_context(self, state: dict[str, Any]) -> ToolContext:
@@ -666,6 +840,9 @@ class EventDrivenAgent:
         )
 
     def _emit(self, event: AgentEvent | dict[str, Any]) -> None:
+        persistent = event.persistent if isinstance(event, AgentEvent) else (
+            event.get("type") != "item.delta" and not event.get("is_delta", False)
+        )
         if isinstance(event, AgentEvent):
             if event.session_id is None:
                 event.session_id = self._session_id
@@ -677,6 +854,8 @@ class EventDrivenAgent:
             data.setdefault("session_id", self._session_id)
             data.setdefault("turn_id", self._turn_id)
         self._run_events.append(data)
+        if persistent and self._session_id:
+            self.session_store.append_events(self._session_id, [data])
         if self.stream_handler:
             self.stream_handler(data)
 
@@ -827,20 +1006,21 @@ class EventDrivenAgent:
 
     def _save_session(self, state: AgentState) -> None:
         session_id = str(state["session_id"])
-        persistent = [event for event in self._run_events if event.get("type") != "item.delta"]
         checkpoint = dict(state)
         checkpoint.pop("_last_tool_signature", None)
         checkpoint.pop("_runtime_context", None)
-        persistent.append(
-            {
-                "type": "state.checkpoint",
-                "session_id": session_id,
-                "turn_id": state.get("turn_id"),
-                "timestamp": datetime.now().astimezone().isoformat(),
-                "state": checkpoint,
-            }
+        self.session_store.append_events(
+            session_id,
+            [
+                {
+                    "type": "state.checkpoint",
+                    "session_id": session_id,
+                    "turn_id": state.get("turn_id"),
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "state": checkpoint,
+                }
+            ],
         )
-        self.session_store.append_events(session_id, persistent)
 
     def _ensure_state_defaults(self, state: dict[str, Any]) -> None:
         defaults = initial_state(
@@ -852,23 +1032,62 @@ class EventDrivenAgent:
         )
         for key, value in defaults.items():
             state.setdefault(key, value)
+        usage = dict(state.get("context_usage") or {})
+        if usage:
+            usage["max_tokens"] = self.config.max_context_tokens
+            usage["threshold_tokens"] = self.config.compact_threshold_tokens
+            usage["threshold_percent"] = round(self.config.compact_threshold * 100, 1)
+            used_tokens = int(usage.get("used_tokens", 0))
+            usage["remaining_tokens"] = max(0, self.config.max_context_tokens - used_tokens)
+            usage["percent_used"] = round(
+                min(1.0, used_tokens / max(1, self.config.max_context_tokens)) * 100,
+                1,
+            )
+            projected = int(usage.get("projected_tokens", used_tokens))
+            usage["projected_percent"] = round(
+                min(1.0, projected / max(1, self.config.max_context_tokens)) * 100,
+                1,
+            )
+            state["context_usage"] = usage
 
     def _add_usage(self, state: AgentState, usage: dict[str, int]) -> None:
-        current = dict(state.get("usage") or {})
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
-        current["input_tokens"] = int(current.get("input_tokens", 0)) + input_tokens
-        current["output_tokens"] = int(current.get("output_tokens", 0)) + output_tokens
-        current["reasoning_tokens"] = int(current.get("reasoning_tokens", 0)) + int(
-            usage.get("reasoning_tokens", 0)
-        )
-        current["cached_tokens"] = int(current.get("cached_tokens", 0)) + int(
-            usage.get("cached_tokens", 0)
-        )
-        current["total_tokens"] = int(current.get("total_tokens", 0)) + int(
-            usage.get("total_tokens", input_tokens + output_tokens)
-        )
-        state["usage"] = current
+        normalized = normalize_usage(usage)
+        if not normalized:
+            return
+        state["usage"] = accumulate_usage(state.get("usage"), normalized)
+        state["last_response_usage"] = normalized
+
+    def _record_context_usage(
+        self,
+        state: AgentState,
+        usage: dict[str, int],
+        *,
+        stage: str,
+    ) -> None:
+        """Use provider-reported input tokens as the authoritative context measurement."""
+        normalized = normalize_usage(usage)
+        if "input_tokens" not in normalized:
+            return
+        used_tokens = normalized["input_tokens"]
+        max_tokens = self.config.max_context_tokens
+        previous = dict(state.get("context_usage") or {})
+        state["context_usage"] = {
+            "used_tokens": used_tokens,
+            "estimated_tokens": int(previous.get("estimated_tokens", 0)),
+            "projected_tokens": used_tokens,
+            "max_tokens": max_tokens,
+            "remaining_tokens": max(0, max_tokens - used_tokens),
+            "percent_used": round(min(1.0, used_tokens / max(1, max_tokens)) * 100, 1),
+            "projected_percent": round(
+                min(1.0, used_tokens / max(1, max_tokens)) * 100,
+                1,
+            ),
+            "threshold_tokens": self.config.compact_threshold_tokens,
+            "threshold_percent": round(self.config.compact_threshold * 100, 1),
+            "source": "response_api",
+            "stage": stage,
+            "message_count": len(state.get("messages", [])),
+        }
 
     @staticmethod
     def _merge_skills(
@@ -895,6 +1114,54 @@ class EventDrivenAgent:
 
     def set_mode(self, mode: str) -> None:
         self.config.mode = mode
+
+    def configure_context(
+        self,
+        *,
+        max_tokens: int | None = None,
+        compact_threshold: float | None = None,
+        keep_recent_tokens: int | None = None,
+        reset: bool = False,
+        persist: bool = True,
+    ) -> dict[str, int | float]:
+        """Update context limits and keep all runtime components in sync."""
+        defaults = RuntimeConfig()
+        resolved_max = defaults.max_context_tokens if reset else self.config.max_context_tokens
+        resolved_threshold = defaults.compact_threshold if reset else self.config.compact_threshold
+        resolved_keep = (
+            defaults.compact_keep_recent_tokens
+            if reset
+            else self.config.compact_keep_recent_tokens
+        )
+        if max_tokens is not None:
+            resolved_max = max_tokens
+        if compact_threshold is not None:
+            resolved_threshold = compact_threshold
+        if keep_recent_tokens is not None:
+            resolved_keep = keep_recent_tokens
+
+        threshold_tokens = int(resolved_max * resolved_threshold)
+        if keep_recent_tokens is None and resolved_keep >= threshold_tokens:
+            resolved_keep = max(1, threshold_tokens // 4)
+
+        RuntimeConfigStore._validate(resolved_max, resolved_threshold, resolved_keep)
+        self.config.max_context_tokens = resolved_max
+        self.config.compact_threshold = resolved_threshold
+        self.config.compact_keep_recent_tokens = resolved_keep
+        self.config.compact_reserve_tokens = max(
+            1,
+            resolved_max - self.config.compact_threshold_tokens,
+        )
+        self.context_builder.max_tokens = resolved_max
+        self.compactor.keep_recent_tokens = resolved_keep
+        if persist:
+            self.runtime_config_store.save(self.config)
+        return {
+            "max_context_tokens": resolved_max,
+            "compact_threshold": resolved_threshold,
+            "compact_threshold_tokens": self.config.compact_threshold_tokens,
+            "compact_keep_recent_tokens": resolved_keep,
+        }
 
     def update_model(
         self,

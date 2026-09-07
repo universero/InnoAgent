@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Callable, TypedDict
+from uuid import uuid4
 
 from core.agent.model_stream import ModelStreamConsumer
 from core.compat import silence_langgraph_deprecations
@@ -168,10 +170,10 @@ class StageRunner:
         raw_steps = parsed.get("steps") or []
         if not raw_steps:
             raise ValueError("planner returned no steps")
-        completed = {
+        existing_steps = {
             step.get("title"): step
             for step in (existing_plan or {}).get("steps", [])
-            if step.get("status") == "done"
+            if step.get("title")
         }
         steps: list[PlanStep] = []
         dependencies: dict[str, list[str]] = {}
@@ -180,24 +182,32 @@ class StageRunner:
             title = str(item.get("title") or "").strip()
             if not title:
                 continue
-            old = completed.get(title)
+            old = existing_steps.get(title)
             steps.append(
                 PlanStep(
+                    step_id=str(old.get("step_id")) if old and old.get("step_id") else uuid4().hex,
                     title=title,
                     description=str(item.get("description") or ""),
-                    status="done" if old else item.get("status", "pending"),
-                    result=old.get("result") if old else None,
+                    status=(
+                        "done"
+                        if old and old.get("status") == "done"
+                        else item.get("status", "pending")
+                    ),
+                    result=old.get("result") if old and old.get("status") == "done" else None,
                 )
             )
             dependencies[title] = [str(value) for value in item.get("depends_on", [])]
         title_to_id = {step.title: step.step_id for step in steps}
         for step in steps:
-            step.depends_on = [title_to_id[name] for name in dependencies[step.title] if name in title_to_id]
+            # 未知依赖保留原值交给 validator 拒绝，不能静默改写模型计划。
+            step.depends_on = [title_to_id.get(name, name) for name in dependencies[step.title]]
         plan = Plan(
+            plan_id=str((existing_plan or {}).get("plan_id") or uuid4().hex),
             goal=goal,
             revision=int((existing_plan or {}).get("revision", 0)) + 1,
             steps=steps,
             rationale=str(parsed.get("summary") or ""),
+            created_at=(existing_plan or {}).get("created_at") or datetime.now(timezone.utc),
         )
         PlanningService()._validate(plan)
         tasks = tasks_from_plan(plan)

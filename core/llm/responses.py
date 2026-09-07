@@ -147,7 +147,10 @@ class OpenAICompatibleModel(BaseModelClient):
         tool_call_ids: dict[int, str] = {}
         completed_calls: set[int] = set()
         text_delta_seen = False
+        text_completed_seen = False
         reasoning_delta_seen = False
+        reasoning_completed_seen = False
+        reasoning_summary_seen = False
         with httpx.stream(
             "POST",
             f"{self.base_url}/responses",
@@ -192,6 +195,7 @@ class OpenAICompatibleModel(BaseModelClient):
                         content=str(data.get("delta") or ""),
                     )
                 elif event_type == "response.reasoning_text.done":
+                    reasoning_completed_seen = True
                     yield AgentEvent(
                         type="item.completed",
                         stage=stage,  # type: ignore[arg-type]
@@ -199,6 +203,28 @@ class OpenAICompatibleModel(BaseModelClient):
                         payload={
                             "content": str(data.get("text") or data.get("delta") or ""),
                             "streamed": reasoning_delta_seen,
+                        },
+                        content=str(data.get("text") or data.get("delta") or ""),
+                    )
+                elif event_type == "response.reasoning_summary_text.delta":
+                    reasoning_summary_seen = True
+                    yield AgentEvent(
+                        type="item.delta",
+                        is_delta=True,
+                        stage=stage,  # type: ignore[arg-type]
+                        item_type="reasoning",
+                        delta=str(data.get("delta") or ""),
+                        content=str(data.get("delta") or ""),
+                    )
+                elif event_type == "response.reasoning_summary_text.done":
+                    reasoning_completed_seen = True
+                    yield AgentEvent(
+                        type="item.completed",
+                        stage=stage,  # type: ignore[arg-type]
+                        item_type="reasoning",
+                        payload={
+                            "content": str(data.get("text") or data.get("delta") or ""),
+                            "streamed": reasoning_summary_seen,
                         },
                         content=str(data.get("text") or data.get("delta") or ""),
                     )
@@ -213,6 +239,7 @@ class OpenAICompatibleModel(BaseModelClient):
                         content=str(data.get("delta") or ""),
                     )
                 elif event_type == "response.output_text.done":
+                    text_completed_seen = True
                     yield AgentEvent(
                         type="item.completed",
                         stage=stage,  # type: ignore[arg-type]
@@ -295,9 +322,69 @@ class OpenAICompatibleModel(BaseModelClient):
                                 "arguments": arguments,
                             },
                         )
+                        completed_calls.add(index)
                 elif event_type == "response.completed":
+                    completed_response = data.get("response") or {}
+                    output_items = completed_response.get("output") or []
+                    for index, item in enumerate(output_items):
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") == "message" and not text_completed_seen:
+                            content = "".join(
+                                str(block.get("text") or block.get("input_text") or "")
+                                for block in (item.get("content") or [])
+                                if isinstance(block, dict)
+                            )
+                            if content:
+                                yield AgentEvent(
+                                    type="item.completed",
+                                    stage=stage,  # type: ignore[arg-type]
+                                    item_type="message",
+                                    content=content,
+                                    payload={"content": content, "streamed": text_delta_seen},
+                                )
+                                text_completed_seen = True
+                        elif item.get("type") == "reasoning" and not reasoning_completed_seen:
+                            summary = "".join(
+                                str(block.get("text") or "")
+                                for block in (item.get("summary") or [])
+                                if isinstance(block, dict)
+                            )
+                            if summary:
+                                yield AgentEvent(
+                                    type="item.completed",
+                                    stage=stage,  # type: ignore[arg-type]
+                                    item_type="reasoning",
+                                    content=summary,
+                                    payload={
+                                        "content": summary,
+                                        "streamed": reasoning_delta_seen or reasoning_summary_seen,
+                                    },
+                                )
+                                reasoning_completed_seen = True
+                        elif item.get("type") == "function_call" and index not in completed_calls:
+                            arguments_text = str(item.get("arguments") or "")
+                            try:
+                                arguments = json.loads(arguments_text) if arguments_text else {}
+                            except json.JSONDecodeError:
+                                arguments = {"_raw": arguments_text}
+                            call_id = str(item.get("call_id") or item.get("id") or index)
+                            yield AgentEvent(
+                                type="item.completed",
+                                stage=stage,  # type: ignore[arg-type]
+                                item_type="tool_call",
+                                call_id=call_id,
+                                tool_name=str(item.get("name") or ""),
+                                arguments=arguments,
+                                payload={
+                                    "name": str(item.get("name") or ""),
+                                    "arguments": arguments,
+                                },
+                            )
+                            completed_calls.add(index)
                     # Provider 可返回嵌套 details，不能直接穿透到严格事件模型。
-                    usage = _normalize_usage((data.get("response") or {}).get("usage"))
+                    raw_usage = completed_response.get("usage")
+                    usage = _normalize_usage(raw_usage) if isinstance(raw_usage, dict) else None
                     yield AgentEvent(
                         type="response.completed",
                         stage=stage,  # type: ignore[arg-type]
@@ -336,7 +423,7 @@ class OpenAICompatibleModel(BaseModelClient):
         state: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         """Build Responses input while preserving function-call/output relationships."""
-        messages = list((state or {}).get("messages") or [])
+        messages = list((state or {}).get("_model_messages") or [])
         if not messages:
             return [
                 {

@@ -10,7 +10,9 @@ import unittest
 from pydantic import BaseModel
 
 from core.tool.base import BaseTool, ToolContext, ToolResult
+from core.tool.read_tool import ReadTool
 from core.tool.registry import ToolRegistry
+from core.tool.write_tool import WriteTool
 
 
 class _Input(BaseModel):
@@ -52,6 +54,27 @@ class ParallelToolTest(unittest.TestCase):
             )
         self.assertEqual(_ProbeTool.peak, 2)
         self.assertEqual([result.output for result in results], ["first", "second"])
+
+    def test_write_is_an_execution_barrier_for_later_reads(self) -> None:
+        registry = ToolRegistry()
+        registry.register(WriteTool())
+        registry.register(ReadTool())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/value.txt"
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("old")
+
+            results = registry.execute_many(
+                [
+                    {"name": "write", "arguments": {"path": path, "content": "new"}},
+                    {"name": "read", "arguments": {"path": path}},
+                ],
+                lambda: ToolContext(mode="auto", allowed_roots=[tmp]),
+                max_workers=2,
+            )
+
+        self.assertEqual([result.status for result in results], ["success", "success"])
+        self.assertEqual(results[1].output, "new")
 
 
 if __name__ == "__main__":

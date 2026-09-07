@@ -117,9 +117,9 @@ class FileConfirmationGuard(BaseGuardrail):
         context: ToolContext,
     ) -> GuardrailDecision:
         """Request confirmation for writes in confirm mode."""
-        if self._is_approved(tool.name, arguments, context.approved_tool_calls):
+        if self._is_approved(tool.name, arguments, context.approved_tool_calls, context):
             return GuardrailDecision()
-        if self._is_approved(tool.name, arguments, context.denied_tool_calls):
+        if self._is_approved(tool.name, arguments, context.denied_tool_calls, context):
             return GuardrailDecision(
                 allowed=False,
                 status="blocked",
@@ -158,12 +158,21 @@ class FileConfirmationGuard(BaseGuardrail):
         tool_name: str,
         arguments: dict[str, Any],
         approved: list[dict[str, Any]],
+        context: ToolContext,
     ) -> bool:
         """Return whether the current call matches an approved confirmation."""
-        return any(
-            item.get("name") == tool_name and item.get("arguments") == arguments
-            for item in approved
-        )
+        expected = dict(arguments)
+        if expected.get("path"):
+            expected["path"] = str(context.resolve_path(str(expected["path"])))
+        for item in approved:
+            if item.get("name") != tool_name:
+                continue
+            candidate = dict(item.get("arguments") or {})
+            if candidate.get("path"):
+                candidate["path"] = str(context.resolve_path(str(candidate["path"])))
+            if candidate == expected:
+                return True
+        return False
 
     def after(
         self,

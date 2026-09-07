@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from core.memory.profile import UserProfile
 from core.prompts import SYSTEM_PROMPT
-from core.session.compression import estimate_tokens, trim_messages
+from core.session.compression import estimate_message_tokens, estimate_tokens, trim_messages
 from core.session.history import Message, SessionHistory
 
 
@@ -18,6 +19,7 @@ class ContextBuilder:
         self.max_tokens = max_tokens
         self.last_usage: dict[str, Any] = {}
         self.last_runtime_context = ""
+        self.last_messages: list[dict[str, Any]] = []
 
     def build(
         self,
@@ -31,15 +33,21 @@ class ContextBuilder:
         context_summary: str | None = None,
         skill_index: str | None = None,
         active_skills: list[dict[str, Any]] | None = None,
+        goal: str | None = None,
     ) -> str:
         """Assemble the model context and trim history when necessary."""
         memory_text = profile.recall_text()
         runtime_sections: list[str] = []
-        if memory_text:
-            runtime_sections.append("用户记忆：\n" + memory_text)
-
+        if goal:
+            runtime_sections.append("当前目标：\n" + goal)
+        if reflection_feedback:
+            runtime_sections.append("反思反馈：\n" + reflection_feedback)
+        if plan:
+            runtime_sections.append(self._plan_block(plan, tasks or []))
         if context_summary:
             runtime_sections.append("压缩后的历史摘要：\n" + context_summary)
+        if memory_text:
+            runtime_sections.append("用户记忆：\n" + memory_text)
 
         history_messages = history.tail(40)
         if context_summary:
@@ -47,6 +55,7 @@ class ContextBuilder:
                 message for message in history_messages if message.role != "summary"
             ]
         recent_messages = trim_messages(history_messages, self.max_tokens // 3)
+        self.last_messages = [message.as_dict() for message in recent_messages]
         conversation_sections: list[str] = []
         if recent_messages:
             history_block = "\n".join(
@@ -59,11 +68,6 @@ class ContextBuilder:
         elif user_input:
             conversation_sections.append(f"用户输入：{user_input}")
 
-        if plan:
-            runtime_sections.append(self._plan_block(plan, tasks or []))
-        if reflection_feedback:
-            runtime_sections.append("反思反馈：\n" + reflection_feedback)
-
         if skill_index:
             runtime_sections.append(skill_index)
         for skill in active_skills or []:
@@ -73,19 +77,42 @@ class ContextBuilder:
                     f"已激活 Skill: {skill.get('name', 'unknown')}\n{content}"
                 )
 
-        self.last_runtime_context = "\n\n".join(runtime_sections)
-
         tool_block = "\n".join(
             f"- {schema['name']}: {schema['description']}" for schema in tool_schemas
         )
-        sections = [*conversation_sections, *runtime_sections]
+        tool_schema_tokens = estimate_tokens(
+            json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True)
+        ) if tool_schemas else 0
+        structured_message_tokens = sum(
+            estimate_message_tokens(message) for message in recent_messages
+        )
+        fixed_tokens = (
+            estimate_tokens(SYSTEM_PROMPT)
+            + structured_message_tokens
+            + tool_schema_tokens
+        )
+        runtime_budget = max(0, self.max_tokens - fixed_tokens)
+        runtime_context = "\n\n".join(runtime_sections)
+        if estimate_tokens(runtime_context) > runtime_budget:
+            runtime_context = runtime_context[: runtime_budget * 4]
+        self.last_runtime_context = runtime_context
+
+        sections = [*conversation_sections]
+        if runtime_context:
+            sections.append(runtime_context)
         if tool_block:
             sections.append("可用工具：\n" + tool_block)
         context = "\n\n".join(sections)
         # 最终硬截断是预算兜底；正常情况下历史裁剪应先释放大部分空间。
         if estimate_tokens(context) > self.max_tokens:
             context = context[: self.max_tokens * 4]
-        used = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(context)
+        structured_input_tokens = (
+            estimate_tokens(SYSTEM_PROMPT)
+            + estimate_tokens(self.last_runtime_context)
+            + structured_message_tokens
+            + tool_schema_tokens
+        )
+        used = max(estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(context), structured_input_tokens)
         self.last_usage = {
             "used_tokens": used,
             "max_tokens": self.max_tokens,

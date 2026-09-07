@@ -9,9 +9,14 @@ reconstruction remains available as a fallback.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
+
+from core.runtime.state import reset_goal_scope, reset_turn_scope
+from core.runtime.usage import accumulate_usage, empty_usage, normalize_usage
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +44,7 @@ class SessionStore:
     def __init__(self, root: str | Path = ".innoagent/sessions") -> None:
         """Store the session directory."""
         self.root = Path(root)
+        self._write_lock = RLock()
 
     def _path(self, session_id: str) -> Path:
         """Return the JSONL path for a session."""
@@ -74,11 +80,13 @@ class SessionStore:
             return
         path = self._path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            for event in events:
-                handle.write(
-                    json.dumps(event, ensure_ascii=False, default=str) + "\n"
-                )
+        with self._write_lock:
+            with path.open("a", encoding="utf-8") as handle:
+                for event in events:
+                    handle.write(
+                        json.dumps(event, ensure_ascii=False, default=str) + "\n"
+                    )
+                handle.flush()
 
     def load_events(self, session_id: str) -> list[dict[str, Any]]:
         """Read all replayable events from a session file."""
@@ -101,8 +109,9 @@ class SessionStore:
         meta: dict[str, Any] | None = None
         name: str | None = None
         checkpoint: dict[str, Any] | None = None
+        checkpoint_index = -1
         updated_at = datetime.now(timezone.utc)
-        for event in events:
+        for index, event in enumerate(events):
             event_type = event.get("type")
             if event_type == "session_meta":
                 meta = event
@@ -112,19 +121,25 @@ class SessionStore:
             elif event_type == "state.checkpoint" and isinstance(event.get("state"), dict):
                 # checkpoint 只用于快速恢复；缺失时仍可从稳定事件重建。
                 checkpoint = event["state"]
+                checkpoint_index = index
             if event.get("timestamp"):
                 updated_at = _parse_time(event.get("timestamp"))
         if meta is None:
             raise KeyError(f"session not found: {session_id}")
+        state = _reconstruct_state(
+            events[checkpoint_index + 1 :] if checkpoint is not None else events,
+            meta,
+            base_state=checkpoint,
+        )
         return SessionRecord(
             session_id=str(meta.get("session_id", session_id)),
             user_id=str(meta.get("user_id", "default")),
             name=name,
             created_at=_parse_time(meta.get("created_at")),
             updated_at=updated_at,
-            goal=(checkpoint or {}).get("goal", meta.get("goal")),
-            mode=str((checkpoint or {}).get("mode", meta.get("mode", "ask"))),
-            state=checkpoint or _reconstruct_state(events, meta),
+            goal=state.get("goal", meta.get("goal")),
+            mode=str(state.get("mode", meta.get("mode", "ask"))),
+            state=state,
         )
 
     def load_state(self, session_id: str) -> dict[str, Any]:
@@ -170,7 +185,12 @@ def _parse_time(value: Any) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> dict[str, Any]:
+def _reconstruct_state(
+    events: list[dict[str, Any]],
+    meta: dict[str, Any],
+    *,
+    base_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Rebuild a minimal AgentState from the replayable event log."""
     state: dict[str, Any] = {
         "session_id": str(meta.get("session_id", "")),
@@ -200,29 +220,36 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
         "pending_confirmation": None,
         "pending_user_question": None,
         "pending_tool_calls": [],
+        "deferred_tool_calls": [],
         "denied_tool_calls": [],
         "active_skills": [],
         "steering_history": [],
         "context_summary": "",
         "context_usage": {},
-        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "usage": empty_usage(),
+        "last_response_usage": {},
         "stage": "main",
         "finish_reason": None,
         "_last_tool_signature": "",
     }
+    if base_state is not None:
+        state.update(deepcopy(base_state))
 
     assistant_text = ""
     for event in events:
         event_type = event.get("type")
         if event_type == "turn.started":
             payload = event.get("payload") or {}
-            state["pending_user_question"] = None
+            goal = payload.get("goal") if "goal" in payload else state.get("goal")
+            if payload.get("goal_restarted") or goal != state.get("goal"):
+                reset_goal_scope(state, goal)
+            else:
+                reset_turn_scope(state)
+                state["goal"] = goal
             content = str(payload.get("user_input") or "")
             state["user_input"] = content
             if content:
                 state["messages"].append({"role": "user", "content": content})
-            if payload.get("goal") is not None:
-                state["goal"] = payload.get("goal")
             state["finished"] = False
         elif event_type == "item.completed":
             item_type = event.get("item_type")
@@ -256,6 +283,17 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
                         "name": str(event.get("tool_name") or result.get("tool_name") or ""),
                     }
                 )
+                data = result.get("data") if isinstance(result, dict) else None
+                if isinstance(data, dict) and data.get("plan") is not None:
+                    state["plan"] = data["plan"]
+                    state["tasks"] = data.get("tasks") or []
+                active_skill = data.get("active_skill") if isinstance(data, dict) else None
+                if isinstance(active_skill, dict):
+                    state["active_skills"] = [
+                        skill
+                        for skill in state.get("active_skills", [])
+                        if skill.get("name") != active_skill.get("name")
+                    ] + [active_skill]
             elif item_type == "plan":
                 state["plan"] = payload.get("plan")
                 state["tasks"] = payload.get("tasks") or []
@@ -276,13 +314,33 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
         elif event_type == "approval.requested":
             payload = event.get("payload") or {}
             state["pending_tool_calls"] = payload.get("calls") or []
+            state["deferred_tool_calls"] = payload.get("deferred_calls") or []
             state["pending_confirmation"] = payload
         elif event_type == "approval.resolved":
             state["pending_tool_calls"] = []
+            state["deferred_tool_calls"] = []
             state["pending_confirmation"] = None
         elif event_type == "context.compaction.completed":
             payload = event.get("payload") or {}
             state["context_summary"] = str(payload.get("summary") or "")
+            if isinstance(payload.get("context_usage"), dict):
+                state["context_usage"] = payload["context_usage"]
+        elif event_type == "response.completed":
+            usage = normalize_usage(event.get("usage"))
+            if usage:
+                state["usage"] = accumulate_usage(state.get("usage"), usage)
+                state["last_response_usage"] = usage
+                if str(event.get("stage") or "main") == "main" and "input_tokens" in usage:
+                    message_count = len(state.get("messages", []))
+                    if message_count and state["messages"][-1].get("role") == "assistant":
+                        message_count -= 1
+                    state["context_usage"] = {
+                        "used_tokens": usage["input_tokens"],
+                        "projected_tokens": usage["input_tokens"],
+                        "source": "response_api",
+                        "stage": "main",
+                        "message_count": message_count,
+                    }
         elif event_type == "steering.applied":
             payload = event.get("payload") or {}
             content = str(payload.get("content") or "")
@@ -299,11 +357,22 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
                     }
                 )
         elif event_type == "turn.completed":
+            payload = event.get("payload") or {}
             state["finished"] = True
-            state["finish_reason"] = (event.get("payload") or {}).get("finish_reason")
+            state["finish_reason"] = payload.get("finish_reason")
+            state["goal_complete"] = bool(payload.get("goal_complete"))
+            if isinstance(payload.get("usage"), dict):
+                state["usage"] = payload["usage"]
+            if isinstance(payload.get("context_usage"), dict):
+                state["context_usage"] = payload["context_usage"]
         elif event_type == "turn.failed":
+            payload = event.get("payload") or {}
             state["finished"] = True
             state["finish_reason"] = "error"
+            if payload.get("error"):
+                state["errors"].append(
+                    {"stage": str(event.get("stage") or "main"), "error": payload["error"]}
+                )
         elif event_type == "user_input":
             if assistant_text:
                 state["messages"].append({"role": "assistant", "content": assistant_text})
@@ -354,11 +423,23 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
                 }
             )
         elif event_type == "needs_confirmation":
+            arguments = event.get("arguments") or (
+                (event.get("metadata") or {}).get("arguments")
+                if isinstance(event.get("metadata"), dict)
+                else {}
+            )
+            call = {
+                "call_id": str(event.get("call_id") or ""),
+                "name": str(event.get("tool_name") or ""),
+                "arguments": arguments or {},
+            }
+            state["pending_tool_calls"] = [call]
             state["pending_confirmation"] = {
                 "tool_name": event.get("tool_name"),
-                "status": "needs_confirmation",
-                "output": event.get("output", ""),
-                "metadata": {"arguments": event.get("arguments") or {}},
+                "arguments": arguments or {},
+                "calls": [call],
+                "reason": event.get("output", ""),
+                "options": ["allow_once", "allow_always", "deny"],
             }
         elif event_type == "finish":
             if assistant_text:

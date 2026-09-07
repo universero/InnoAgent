@@ -11,6 +11,7 @@ from unittest.mock import patch
 from pydantic import BaseModel
 
 from core.event.events import AgentEvent
+from core.agent.model_stream import ModelBatch
 from core.llm import BaseModelClient, ModelDecision, OpenAICompatibleModel, ToolCallDecision
 from core.runtime.agent import InnoAgentRuntime
 from core.runtime.config import RuntimeConfig
@@ -60,6 +61,31 @@ class _UsageSubagentModel(_SubagentModel):
                 "output_tokens": 1,
                 "total_tokens": 3,
                 "cached_tokens": 1,
+            },
+        )
+
+
+class _UsageOnlyModel(BaseModelClient):
+    def respond(self, context, tool_schemas, state=None, on_token=None, on_thinking=None):
+        return ModelDecision(action="finish", message="done")
+
+    def stream_events(self, context, tool_schemas, *, stage="main", state=None):
+        yield AgentEvent(
+            type="item.completed",
+            stage=stage,
+            item_type="message",
+            content="done",
+            payload={"content": "done"},
+        )
+        yield AgentEvent(
+            type="response.completed",
+            stage=stage,
+            usage={
+                "input_tokens": 600,
+                "output_tokens": 20,
+                "total_tokens": 620,
+                "cached_tokens": 100,
+                "reasoning_tokens": 5,
             },
         )
 
@@ -141,6 +167,15 @@ class _BoundaryModel(BaseModelClient):
         return ModelDecision(action="finish", message=correction)
 
 
+class _CapturingSubagentStream:
+    def __init__(self) -> None:
+        self.states: list[dict] = []
+
+    def call(self, context, state, *, stage, tool_schemas):
+        self.states.append(dict(state))
+        return ModelBatch(text="done")
+
+
 class AdvancedRuntimeTest(unittest.TestCase):
     def _config(self, tmp: str) -> RuntimeConfig:
         return RuntimeConfig(
@@ -174,6 +209,71 @@ class AdvancedRuntimeTest(unittest.TestCase):
             result = runtime.invoke("delegate inspection")
             self.assertEqual(result["usage"]["total_tokens"], 12)
             self.assertEqual(result["usage"]["cached_tokens"], 4)
+            self.assertEqual(result["usage"]["requests"], 4)
+
+    def test_response_usage_is_cumulative_and_drives_context_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(self._config(tmp), model=_UsageOnlyModel())
+
+            first = runtime.invoke("first request")
+            second = runtime.invoke("second request", session_id=first["session_id"])
+
+            self.assertEqual(second["usage"]["input_tokens"], 1200)
+            self.assertEqual(second["usage"]["output_tokens"], 40)
+            self.assertEqual(second["usage"]["cached_tokens"], 200)
+            self.assertEqual(second["usage"]["reasoning_tokens"], 10)
+            self.assertEqual(second["usage"]["total_tokens"], 1240)
+            self.assertEqual(second["usage"]["requests"], 2)
+            self.assertEqual(second["context_usage"]["used_tokens"], 600)
+            self.assertEqual(second["context_usage"]["source"], "response_api")
+
+    def test_real_response_usage_can_trigger_automatic_compaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            config.max_context_tokens = 1000
+            config.compact_threshold = 0.5
+            config.compact_keep_recent_tokens = 20
+            runtime = InnoAgentRuntime(
+                config,
+                model=_UsageOnlyModel(),
+                summarizer=lambda _: "older context",
+            )
+            first = runtime.invoke("old request " * 30)
+
+            runtime.invoke("continue", session_id=first["session_id"])
+
+            completed = [
+                event
+                for event in runtime._run_events
+                if event["type"] == "context.compaction.completed"
+            ]
+            self.assertTrue(completed)
+            self.assertEqual(completed[0]["payload"]["trigger"], "auto")
+
+    def test_subagent_sends_prompt_and_role_as_runtime_context(self) -> None:
+        from core.agent.subagent import SubagentRunner
+        from core.config.permissions import PermissionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = _CapturingSubagentStream()
+            runner = SubagentRunner(
+                stream,  # type: ignore[arg-type]
+                ToolRegistry(),
+                self._config(tmp),
+                PermissionStore(tmp),
+                lambda event: None,
+            )
+
+            result = runner.run(task="inspect tests", role="reviewer", allowed_tools=[])
+
+            self.assertEqual(result["summary"], "done")
+            runtime_context = stream.states[0]["_runtime_context"]
+            self.assertIn("isolated read-only subagent", runtime_context)
+            self.assertIn("Role: reviewer", runtime_context)
+            self.assertEqual(
+                stream.states[0]["_model_messages"],
+                [{"role": "user", "content": "inspect tests"}],
+            )
 
     def test_manual_compaction_persists_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -339,10 +439,33 @@ class AdvancedRuntimeTest(unittest.TestCase):
     def test_unexpected_run_error_clears_active_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = InnoAgentRuntime(self._config(tmp), model=_SubagentModel())
-            with patch.object(runtime, "_run_react", side_effect=RuntimeError("boom")):
+
+            def fail_after_completed_event(state):
+                runtime._emit(
+                    AgentEvent(
+                        type="item.completed",
+                        item_type="message",
+                        payload={"content": "visible before failure"},
+                    )
+                )
+                raise RuntimeError("boom")
+
+            with patch.object(runtime, "_run_react", side_effect=fail_after_completed_event):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
                     runtime.invoke("trigger failure")
             self.assertFalse(runtime.submit_steering("too late"))
+            record = runtime.list_sessions(limit=1)[0]
+            events = runtime.session_store.load_events(record.session_id)
+            self.assertTrue(any(event["type"] == "turn.started" for event in events))
+            self.assertTrue(
+                any(
+                    event["type"] == "item.completed"
+                    and event.get("payload", {}).get("content") == "visible before failure"
+                    for event in events
+                )
+            )
+            self.assertTrue(any(event["type"] == "turn.failed" for event in events))
+            self.assertTrue(any(event["type"] == "state.checkpoint" for event in events))
 
 
 if __name__ == "__main__":

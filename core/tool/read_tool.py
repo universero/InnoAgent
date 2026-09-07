@@ -59,28 +59,59 @@ class ReadTool(BaseTool):
                 status="error",
                 output=f"文件不存在: {path}",
             )
+        start = max(1, args.get("start_line") or 1)
+        end = args.get("end_line")
+        max_chars = int(context.services.get("max_tool_output_chars", 30000))
+        digest = hashlib.sha256()
+        byte_count = 0
+        character_count = 0
+        line_count = 0
+        selected_count = 0
+        selected_chars = 0
+        output_parts: list[str] = []
+        output_chars = 0
         try:
-            raw = path.read_bytes()
-            content = raw.decode("utf-8", errors="replace")
+            # 逐行扫描以计算完整摘要，但只在内存中保留有界返回内容。
+            with path.open("rb") as handle:
+                for line_count, raw_line in enumerate(handle, 1):
+                    digest.update(raw_line)
+                    byte_count += len(raw_line)
+                    line = raw_line.decode("utf-8", errors="replace")
+                    character_count += len(line)
+                    if line_count < start or (end is not None and line_count > end):
+                        continue
+                    value = line.rstrip("\r\n")
+                    prefix = "\n" if selected_count else ""
+                    selected_count += 1
+                    selected_chars += len(prefix) + len(value)
+                    remaining = max(0, max_chars - output_chars)
+                    if remaining:
+                        chunk = (prefix + value)[:remaining]
+                        output_parts.append(chunk)
+                        output_chars += len(chunk)
         except OSError as exc:
             return ToolResult(tool_name=self.name, status="error", output=str(exc))
 
-        lines = content.splitlines()
-        start = max(1, args.get("start_line") or 1)
-        end = args.get("end_line") or len(lines)
-        selected = lines[start - 1 : end]
+        output = "".join(output_parts)
+        omitted = max(0, selected_chars - len(output))
+        warnings = []
+        if omitted:
+            output += f"\n[... {omitted} characters truncated]"
+            warnings.append("tool output was truncated")
         return ToolResult(
             tool_name=self.name,
             status="success",
-            output="\n".join(selected),
+            output=output,
+            warnings=warnings,
             metadata={
                 "path": str(path),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "byte_count": len(raw),
-                "character_count": len(content),
-                "size": len(content),
-                "line_count": len(lines),
+                "sha256": digest.hexdigest(),
+                "byte_count": byte_count,
+                "character_count": character_count,
+                "size": character_count,
+                "line_count": line_count,
                 "start_line": start,
-                "end_line": min(end, len(lines)),
+                "end_line": min(end or line_count, line_count),
+                "truncated": bool(omitted),
             },
         )

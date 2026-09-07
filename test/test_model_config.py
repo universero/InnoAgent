@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.runtime.model_config import ModelConfigLoader
+from core.runtime.config import RuntimeConfig, RuntimeConfigStore
+from core.runtime.model_config import ModelConfig, ModelConfigLoader
 
 
 class ModelConfigLoaderTest(unittest.TestCase):
@@ -120,6 +121,45 @@ class ModelConfigLoaderTest(unittest.TestCase):
                 config = loader.load()
             self.assertEqual(config.source, "project")
             self.assertTrue(loader.project_config_path.exists())
+
+    def test_model_save_preserves_runtime_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            loader = self._loader(tmp)
+            loader.project_config_path.parent.mkdir(parents=True, exist_ok=True)
+            loader.project_config_path.write_text(
+                json.dumps({"runtime": {"max_context_tokens": 64000}}),
+                encoding="utf-8",
+            )
+
+            loader.save(ModelConfig(api_key="key", model="new-model"))
+
+            saved = json.loads(loader.project_config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["runtime"]["max_context_tokens"], 64000)
+            self.assertEqual(saved["model"], "new-model")
+
+    def test_runtime_settings_load_without_exposing_model_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, ".innoagent", "config.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "api_key": "secret",
+                        "runtime": {
+                            "max_context_tokens": 64000,
+                            "compact_threshold": 0.75,
+                            "compact_keep_recent_tokens": 8000,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = RuntimeConfigStore(tmp).load(RuntimeConfig(workspace_root=tmp))
+
+            self.assertEqual(config.max_context_tokens, 64000)
+            self.assertEqual(config.compact_threshold_tokens, 48000)
+            self.assertEqual(config.compact_keep_recent_tokens, 8000)
 
 
 if __name__ == "__main__":

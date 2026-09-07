@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -18,17 +19,31 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def estimate_message_tokens(message: Message) -> int:
+    """Estimate content plus structured tool-call linkage."""
+    return estimate_tokens(
+        message.content
+        + json.dumps(message.tool_calls, ensure_ascii=False)
+        + str(message.tool_call_id or "")
+        + str(message.name or "")
+    )
+
+
 def trim_messages(messages: list[Message], max_tokens: int) -> list[Message]:
     """Keep the most recent messages within the token budget."""
     result: list[Message] = []
     used = 0
     for message in reversed(messages):
-        cost = estimate_tokens(message.content)
+        cost = estimate_message_tokens(message)
         if result and used + cost > max_tokens:
             break
         result.append(message)
         used += cost
     result.reverse()
+    start = len(messages) - len(result)
+    while start > 0 and result and result[0].role != "user":
+        start -= 1
+        result.insert(0, messages[start])
     return result
 
 
@@ -67,13 +82,9 @@ class ContextCompactor:
         *,
         focus: str | None = None,
     ) -> CompactionResult:
-        tokens_before = sum(estimate_tokens(message.content) for message in messages)
+        tokens_before = sum(estimate_message_tokens(message) for message in messages)
         recent = trim_messages(messages, self.keep_recent_tokens)
         split = max(0, len(messages) - len(recent))
-        # 压缩边界向前扩到 user 消息，避免留下缺少问题语境的半个 turn。
-        while split > 0 and recent and recent[0].role != "user":
-            split -= 1
-            recent.insert(0, messages[split])
         older = messages[:split]
         if not older:
             return CompactionResult(
@@ -97,7 +108,7 @@ class ContextCompactor:
         if not summary:
             summary = fallback_summary(older)
         compacted = [Message(role="summary", content=summary), *recent]
-        tokens_after = sum(estimate_tokens(message.content) for message in compacted)
+        tokens_after = sum(estimate_message_tokens(message) for message in compacted)
         return CompactionResult(
             messages=compacted,
             summary=summary,

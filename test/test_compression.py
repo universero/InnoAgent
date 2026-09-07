@@ -66,6 +66,20 @@ class CompressionTest(unittest.TestCase):
         self.assertEqual(context.count("read test.md"), 1)
         self.assertNotIn("read test.md", builder.last_runtime_context)
 
+    def test_context_always_exposes_active_goal_to_model(self) -> None:
+        builder = ContextBuilder(max_tokens=1000)
+
+        context = builder.build(
+            "继续执行",
+            SessionHistory([Message(role="user", content="继续执行")]),
+            UserProfile.default_for("default"),
+            [],
+            goal="在 test.md 中追加 333",
+        )
+
+        self.assertIn("当前目标：\n在 test.md 中追加 333", context)
+        self.assertIn("当前目标：\n在 test.md 中追加 333", builder.last_runtime_context)
+
     def test_compaction_keeps_complete_recent_user_turn(self) -> None:
         messages = [
             Message(role="user", content="old request " * 20),
@@ -81,6 +95,78 @@ class CompressionTest(unittest.TestCase):
             [message.role for message in result.messages],
             ["summary", "user", "assistant"],
         )
+
+    def test_compaction_preserves_structured_tool_call_relationship(self) -> None:
+        messages = [
+            Message(role="user", content="old " * 100),
+            Message(role="assistant", content="old result " * 100),
+            Message(role="user", content="read test.md"),
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "call_id": "call_read",
+                        "name": "read",
+                        "arguments": {"path": "test.md"},
+                    }
+                ],
+            ),
+            Message(
+                role="tool",
+                content="its a test",
+                tool_call_id="call_read",
+                name="read",
+            ),
+        ]
+
+        result = ContextCompactor(keep_recent_tokens=30).compact(
+            messages,
+            lambda _: "older summary",
+        )
+        serialized = [message.as_dict() for message in result.messages]
+
+        assistant = next(item for item in serialized if item.get("tool_calls"))
+        tool = next(item for item in serialized if item.get("role") == "tool")
+        self.assertEqual(assistant["tool_calls"][0]["call_id"], "call_read")
+        self.assertEqual(tool["tool_call_id"], "call_read")
+
+    def test_context_selection_keeps_complete_structured_tool_turn(self) -> None:
+        history = SessionHistory(
+            [
+                Message(role="user", content="old " * 200),
+                Message(role="assistant", content="old response " * 200),
+                Message(role="user", content="read test.md"),
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {
+                            "call_id": "call_read",
+                            "name": "read",
+                            "arguments": {"path": "test.md"},
+                        }
+                    ],
+                ),
+                Message(
+                    role="tool",
+                    content="its a test",
+                    tool_call_id="call_read",
+                    name="read",
+                ),
+            ]
+        )
+        builder = ContextBuilder(max_tokens=180)
+
+        builder.build(
+            "read test.md",
+            history,
+            UserProfile.default_for("default"),
+            [],
+        )
+
+        self.assertNotIn("old response", str(builder.last_messages))
+        assistant = next(item for item in builder.last_messages if item.get("tool_calls"))
+        tool = next(item for item in builder.last_messages if item.get("role") == "tool")
+        self.assertEqual(assistant["tool_calls"][0]["call_id"], tool["tool_call_id"])
 
 
 if __name__ == "__main__":
