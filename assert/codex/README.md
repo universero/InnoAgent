@@ -27,6 +27,18 @@ Codex 不是“CLI 加一个 Agent loop”，而是以 Rust workspace 为主体�
 | [12-testing-build-release-observability.md](12-testing-build-release-observability.md) | 测试、构建、发布、遥测与诊断 |
 | [13-design-assessment-innoagent-lessons.md](13-design-assessment-innoagent-lessons.md) | 设计评价与 InnoAgent 落地路线 |
 | [14-crate-catalog.md](14-crate-catalog.md) | Rust crate 与非 Rust package 完整目录 |
+| [15-core-internals.md](15-core-internals.md) | Core 内部模块、状态对象与完整调用链 |
+| [16-model-network-internals.md](16-model-network-internals.md) | 模型协议、传输、provider 与重试实现 |
+| [17-tool-sandbox-internals.md](17-tool-sandbox-internals.md) | 工具执行、命令会话、安全决策与平台隔离实现 |
+| [18-app-server-protocol-internals.md](18-app-server-protocol-internals.md) | App Server processors、RPC、通知与连接状态实现 |
+| [19-storage-internals.md](19-storage-internals.md) | ThreadStore、rollout、SQLite 与恢复实现 |
+| [20-extension-internals.md](20-extension-internals.md) | Extension、MCP、Plugin、Skill、Hook 与 Memory 实现 |
+| [21-surfaces-internals.md](21-surfaces-internals.md) | CLI、TUI、exec 与两套 SDK 实现 |
+| [22-platform-utilities-internals.md](22-platform-utilities-internals.md) | Cloud、实时、构建、可观测与 utilities 实现 |
+| [23-verification-matrix.md](23-verification-matrix.md) | 全模块证据、风险与验证状态矩阵 |
+| [24-crate-implementation-notes.md](24-crate-implementation-notes.md) | 每个 crate/package 的实现机制、输入输出和边界 |
+| [25-end-to-end-sequences.md](25-end-to-end-sequences.md) | 启动、turn、工具、恢复、MCP、子 Agent 的端到端时序 |
+| [26-config-auth-internals.md](26-config-auth-internals.md) | 配置分层、受管约束、权限投影与认证刷新实现 |
 
 ## 覆盖矩阵
 
