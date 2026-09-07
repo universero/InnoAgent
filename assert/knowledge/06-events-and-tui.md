@@ -121,7 +121,7 @@ TUI 输入由 `_dispatch_tui_input()` 按状态路由：
 
 Slash 命令是控制输入，不追加为普通用户消息。否则模型会把“切换模式”误解为业务任务，Session 重放也无法区分控制行为。
 
-命令名称、usage、说明和静态参数枚举集中维护在 `view/commands.py`。输入 `/` 展示命令，输入 `/mode a` 等内容时按参数前缀过滤；CLI 通过 `command_option_provider` 为 `/resume` 和 `/skill` 注入 session、Skill 等动态候选。候选菜单统一支持上下移动，Tab 会同步计算并应用首个匹配项，不依赖异步菜单已经完成渲染。`/help` 从同一份注册表生成，避免命令解析、帮助和补全信息漂移。
+命令名称、usage、说明和静态参数枚举集中维护在 `view/commands.py`。输入 `/` 展示命令，输入 `/mode a` 等内容时按参数前缀过滤；CLI 通过 `command_option_provider` 为 `/resume` 和 `/skill` 注入 session、Skill 等动态候选。候选菜单统一支持上下移动，Tab 会同步计算并应用首个匹配项，不依赖异步菜单已经完成渲染。prompt-toolkit 的 history search 会关闭 `complete_while_typing`，因此历史导航由自定义上下键处理；候选打开时输入窗口按可见项临时增高，关闭后恢复两行，避免浮层被固定高度裁切。`/help` 从同一份注册表生成，避免命令解析、帮助和补全信息漂移。
 
 `TerminalIO.select()` 是模型选择和用户问题共用的选择状态机。候选项由同一个 `PromptSession` 的 completion menu 展示，选中索引由终端层同步维护，因此快速按键不依赖异步补全是否已经结束。普通选项用 `↑`、`↓` 和 `Enter` 操作；问题可追加“自行输入…”，切换后继续复用底部输入框。`Esc` 在自定义输入阶段返回选项，在选项阶段取消；`Ctrl-C` 仍沿用全局优雅退出语义。
 

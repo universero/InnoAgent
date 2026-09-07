@@ -33,6 +33,7 @@ from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
 
 MAX_TRANSCRIPT_CHARS = 120_000
+MAX_COMPLETION_ROWS = 10
 
 
 SubmitHandler = Callable[[str], Awaitable[None] | None]
@@ -207,7 +208,9 @@ class TerminalIO:
             complete_while_typing=True,
             complete_style=CompleteStyle.COLUMN,
             reserve_space_for_menu=10,
-            enable_history_search=True,
+            # prompt-toolkit 会在 history search 开启时禁用输入时补全。
+            # 历史记录仍由下方 Up/Down 绑定负责导航。
+            enable_history_search=False,
             key_bindings=self._key_bindings(),
             style=TUI_STYLE,
             multiline=False,
@@ -221,7 +224,15 @@ class TerminalIO:
         # PromptSession 没有公开的输入窗口样式参数，只给当前输入窗口绑定局部主题，
         # 避免通过默认样式给整个终端空白区域着色。
         self.session.app.layout.current_window.style = "class:input"
-        self.session.app.layout.current_window.height = Dimension.exact(2)
+        self.session.app.layout.current_window.height = self._input_height
+
+    def _input_height(self) -> Dimension:
+        """Keep the editor compact, but reserve rows while a menu is visible."""
+        completion = self.session.default_buffer.complete_state
+        if completion is None or not completion.completions:
+            return Dimension.exact(2)
+        rows = min(MAX_COMPLETION_ROWS, len(completion.completions))
+        return Dimension.exact(rows + 1)
 
     @property
     def transcript_text(self) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -113,6 +114,43 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(submitted, ["/resume session-123"])
 
+    def test_slash_candidates_open_while_typing(self) -> None:
+        async def inspect_completion_state() -> tuple[list[str], int]:
+            with create_pipe_input() as pipe_input:
+                ui = TerminalIO(
+                    app_input=pipe_input,
+                    app_output=DummyOutput(),
+                )
+                prompt = asyncio.create_task(
+                    ui.session.prompt_async(
+                        completer=ui._slash_completer,
+                        complete_while_typing=True,
+                    )
+                )
+                try:
+                    await asyncio.sleep(0.05)
+                    pipe_input.send_text("/")
+                    for _ in range(20):
+                        await asyncio.sleep(0.01)
+                        state = ui.session.default_buffer.complete_state
+                        if state is not None:
+                            height = ui.session.app.layout.current_window.height()
+                            return (
+                                [item.text for item in state.completions],
+                                height.preferred,
+                            )
+                    return [], 0
+                finally:
+                    prompt.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await prompt
+
+        candidates, input_height = asyncio.run(inspect_completion_state())
+
+        self.assertIn("/help", candidates)
+        self.assertIn("/resume", candidates)
+        self.assertGreater(input_height, 2)
+
     def test_non_tty_uses_plain_input_without_prompt_toolkit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = InnoAgentRuntime(
@@ -203,7 +241,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(ui.session.app.erase_when_done)
         self.assertIsNotNone(ui.session.bottom_toolbar)
         self.assertEqual(ui.session.app.layout.current_window.style, "class:input")
-        self.assertEqual(ui.session.app.layout.current_window.height.preferred, 2)
+        self.assertEqual(ui._input_height().preferred, 2)
 
     def test_inline_tui_uses_local_blue_theme_without_global_background(self) -> None:
         rules = dict(TUI_STYLE.style_rules)
