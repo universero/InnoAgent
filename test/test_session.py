@@ -153,6 +153,45 @@ class SessionTest(unittest.TestCase):
                 },
             )
 
+    def test_event_only_replay_preserves_tool_call_relationship(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="tool-replay"))
+            store.append_events(
+                "tool-replay",
+                [
+                    {
+                        "type": "turn.started",
+                        "payload": {"user_input": "read test.md"},
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "tool_call",
+                        "call_id": "call_read",
+                        "tool_name": "read",
+                        "arguments": {"path": "test.md"},
+                    },
+                    {
+                        "type": "item.completed",
+                        "item_type": "tool_result",
+                        "call_id": "call_read",
+                        "tool_name": "read",
+                        "payload": {
+                            "result": {
+                                "tool_name": "read",
+                                "status": "success",
+                                "output": "its a test",
+                            }
+                        },
+                    },
+                ],
+            )
+
+            messages = store.load_state("tool-replay")["messages"]
+
+            self.assertEqual(messages[1]["tool_calls"][0]["call_id"], "call_read")
+            self.assertEqual(messages[2]["tool_call_id"], "call_read")
+
 
 if __name__ == "__main__":
     unittest.main()

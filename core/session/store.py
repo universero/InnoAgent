@@ -232,11 +232,29 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
                 if content:
                     state["messages"].append({"role": "assistant", "content": content})
                     state["response"] = content
+            elif item_type == "tool_call":
+                call = {
+                    "call_id": str(event.get("call_id") or ""),
+                    "name": str(event.get("tool_name") or payload.get("name") or ""),
+                    "arguments": event.get("arguments") or payload.get("arguments") or {},
+                }
+                messages = state["messages"]
+                if messages and messages[-1].get("role") == "assistant":
+                    messages[-1].setdefault("tool_calls", []).append(call)
+                else:
+                    messages.append(
+                        {"role": "assistant", "content": "", "tool_calls": [call]}
+                    )
             elif item_type == "tool_result":
                 result = payload.get("result") or event.get("result") or {}
                 state["tool_results"].append(result)
                 state["messages"].append(
-                    {"role": "tool", "content": str(result.get("output") or result.get("status") or "")}
+                    {
+                        "role": "tool",
+                        "content": str(result.get("output") or result.get("status") or ""),
+                        "tool_call_id": str(event.get("call_id") or ""),
+                        "name": str(event.get("tool_name") or result.get("tool_name") or ""),
+                    }
                 )
             elif item_type == "plan":
                 state["plan"] = payload.get("plan")

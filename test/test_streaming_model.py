@@ -116,9 +116,9 @@ class StreamingModelTest(unittest.TestCase):
 
     def test_event_stream_preserves_multiple_tool_calls_and_usage(self) -> None:
         lines = [
-            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"read"}}',
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_read","name":"read"}}',
             'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"path\\":\\"a.txt\\"}"}',
-            'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","name":"ls"}}',
+            'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_ls","name":"ls"}}',
             'data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\\"path\\":\\".\\"}"}',
             'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":3},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":14}}}',
         ]
@@ -127,6 +127,7 @@ class StreamingModelTest(unittest.TestCase):
             events = list(model.stream_events("inspect", []))
         calls = [event for event in events if event.type == "item.completed" and event.item_type == "tool_call"]
         self.assertEqual([event.tool_name for event in calls], ["read", "ls"])
+        self.assertEqual([event.call_id for event in calls], ["call_read", "call_ls"])
         self.assertEqual(calls[0].arguments, {"path": "a.txt"})
         self.assertEqual(
             events[-1].usage,
@@ -138,6 +139,46 @@ class StreamingModelTest(unittest.TestCase):
                 "reasoning_tokens": 2,
             },
         )
+
+    def test_payload_replays_tool_calls_as_structured_response_items(self) -> None:
+        lines = ['data: {"type":"response.completed"}']
+        state = {
+            "_runtime_context": "workspace: /tmp/project",
+            "messages": [
+                {"role": "user", "content": "读 test.md"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "call_id": "call_read",
+                            "name": "read",
+                            "arguments": {"path": "test.md"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "[read] ok\nits a test",
+                    "tool_call_id": "call_read",
+                    "name": "read",
+                },
+            ],
+        }
+        with patch(
+            "core.llm.responses.httpx.stream",
+            return_value=_FakeStreamResponse(lines),
+        ) as request:
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            list(model.stream_events("flattened fallback", [], state=state))
+
+        payload = request.call_args.kwargs["json"]
+        self.assertNotIn("flattened fallback", json.dumps(payload, ensure_ascii=False))
+        self.assertEqual(payload["input"][1]["role"], "user")
+        self.assertEqual(payload["input"][2]["type"], "function_call")
+        self.assertEqual(payload["input"][2]["call_id"], "call_read")
+        self.assertEqual(payload["input"][3]["type"], "function_call_output")
+        self.assertEqual(payload["input"][3]["call_id"], "call_read")
 
     def test_event_stream_safely_normalizes_invalid_usage_values(self) -> None:
         lines = [

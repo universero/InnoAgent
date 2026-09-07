@@ -117,7 +117,7 @@ class OpenAICompatibleModel(BaseModelClient):
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelDecision:
         """调用 Responses API 并解析 SSE 事件流。"""
-        payload = self._build_payload(context, tool_schemas)
+        payload = self._build_payload(context, tool_schemas, state=state)
         with httpx.stream(
             "POST",
             f"{self.base_url}/responses",
@@ -142,8 +142,9 @@ class OpenAICompatibleModel(BaseModelClient):
         state: dict[str, Any] | None = None,
     ):
         """调用 Responses API，并将响应事件转换为内部事件流。"""
-        payload = self._build_payload(context, tool_schemas)
+        payload = self._build_payload(context, tool_schemas, state=state)
         tool_names: dict[int, str] = {}
+        tool_call_ids: dict[int, str] = {}
         completed_calls: set[int] = set()
         text_delta_seen = False
         reasoning_delta_seen = False
@@ -227,11 +228,13 @@ class OpenAICompatibleModel(BaseModelClient):
                     if item.get("type") == "function_call":
                         index = int(data.get("output_index", 0))
                         tool_names[index] = str(item.get("name") or "")
+                        call_id = str(item.get("call_id") or item.get("id") or index)
+                        tool_call_ids[index] = call_id
                         yield AgentEvent(
                             type="item.started",
                             stage=stage,  # type: ignore[arg-type]
                             item_type="tool_call",
-                            call_id=str(index),
+                            call_id=call_id,
                             tool_name=str(item.get("name") or ""),
                             arguments={},
                             payload={"name": str(item.get("name") or "")},
@@ -243,7 +246,7 @@ class OpenAICompatibleModel(BaseModelClient):
                         is_delta=True,
                         stage=stage,  # type: ignore[arg-type]
                         item_type="tool_call",
-                        call_id=str(index),
+                        call_id=tool_call_ids.get(index, str(index)),
                         delta=str(data.get("delta") or ""),
                         content=str(data.get("delta") or ""),
                     )
@@ -259,7 +262,7 @@ class OpenAICompatibleModel(BaseModelClient):
                         type="item.completed",
                         stage=stage,  # type: ignore[arg-type]
                         item_type="tool_call",
-                        call_id=str(index),
+                        call_id=tool_call_ids.get(index, str(index)),
                         tool_name=tool_names.get(index, ""),
                         arguments=arguments,
                         payload={"name": tool_names.get(index, ""), "arguments": arguments},
@@ -268,6 +271,13 @@ class OpenAICompatibleModel(BaseModelClient):
                     item = data.get("item") or {}
                     index = int(data.get("output_index", 0))
                     if item.get("type") == "function_call" and index not in completed_calls:
+                        call_id = str(
+                            item.get("call_id")
+                            or item.get("id")
+                            or tool_call_ids.get(index)
+                            or index
+                        )
+                        tool_call_ids[index] = call_id
                         arguments_text = str(item.get("arguments") or "")
                         try:
                             arguments = json.loads(arguments_text) if arguments_text else {}
@@ -277,7 +287,7 @@ class OpenAICompatibleModel(BaseModelClient):
                             type="item.completed",
                             stage=stage,  # type: ignore[arg-type]
                             item_type="tool_call",
-                            call_id=str(index),
+                            call_id=call_id,
                             tool_name=str(item.get("name") or tool_names.get(index, "")),
                             arguments=arguments,
                             payload={
@@ -295,17 +305,18 @@ class OpenAICompatibleModel(BaseModelClient):
                         usage=usage,
                     )
 
-    def _build_payload(self, context: str, tool_schemas: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_payload(
+        self,
+        context: str,
+        tool_schemas: list[dict[str, Any]],
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """组装 Responses API 请求体。"""
         return {
             "model": self.model,
             "instructions": SYSTEM_PROMPT,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": context}],
-                }
-            ],
+            "input": self._build_input(context, state),
             "tools": [
                 {
                     "type": "function",
@@ -318,6 +329,99 @@ class OpenAICompatibleModel(BaseModelClient):
             "reasoning": {"effort": self.reasoning_effort},
             "stream": True,
         }
+
+    @staticmethod
+    def _build_input(
+        context: str,
+        state: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Build Responses input while preserving function-call/output relationships."""
+        messages = list((state or {}).get("messages") or [])
+        if not messages:
+            return [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": context}],
+                }
+            ]
+
+        items: list[dict[str, Any]] = []
+        runtime_context = str((state or {}).get("_runtime_context") or "").strip()
+        if runtime_context:
+            items.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Runtime context (not a user request):\n" + runtime_context,
+                        }
+                    ],
+                }
+            )
+
+        for message in messages:
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "")
+            if role in {"user", "assistant"} and content:
+                items.append(
+                    {
+                        "role": role,
+                        "content": [
+                            {
+                                "type": "input_text" if role == "user" else "output_text",
+                                "text": content,
+                            }
+                        ],
+                    }
+                )
+
+            if role == "assistant":
+                for call in message.get("tool_calls") or []:
+                    call_id = str(call.get("call_id") or "")
+                    name = str(call.get("name") or "")
+                    if not call_id or not name:
+                        continue
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": json.dumps(
+                                call.get("arguments") or {},
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+            elif role == "tool":
+                call_id = str(message.get("tool_call_id") or "")
+                if call_id:
+                    items.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": content,
+                        }
+                    )
+                elif content:
+                    # 旧 session 没有 call_id，只能作为低权限上下文兼容恢复。
+                    items.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": "Previous tool result:\n" + content,
+                                }
+                            ],
+                        }
+                    )
+        return items or [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": context}],
+            }
+        ]
 
     def _parse_stream(
         self,

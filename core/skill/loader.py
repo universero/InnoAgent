@@ -11,6 +11,7 @@ from core.session.compression import estimate_tokens
 
 
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+MAX_INDEX_DESCRIPTION_CHARS = 180
 
 
 class Skill(BaseModel):
@@ -72,7 +73,10 @@ class SkillLoader:
             return ""
         lines = ["Available skills (load with the skill tool when relevant):"]
         for skill in skills:
-            lines.append(f"- {skill.name}: {skill.description} ({skill.path})")
+            description = " ".join(skill.description.split())
+            if len(description) > MAX_INDEX_DESCRIPTION_CHARS:
+                description = description[: MAX_INDEX_DESCRIPTION_CHARS - 1].rstrip() + "…"
+            lines.append(f"- {skill.name}: {description}")
         return "\n".join(lines)
 
     def _metadata(self, path: Path) -> Skill | None:

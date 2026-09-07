@@ -15,6 +15,7 @@ class AgentState(TypedDict, total=False):
     user_id: str
     user_input: str
     context: str
+    _runtime_context: str
     messages: list[dict[str, Any]]
 
     next_action: NextAction

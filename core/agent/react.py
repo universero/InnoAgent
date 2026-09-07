@@ -235,11 +235,6 @@ class EventDrivenAgent:
             state["finish_reason"] = "error"
             return state, "end"
 
-        if batch.text:
-            state["messages"] = list(state.get("messages", [])) + [
-                {"role": "assistant", "content": batch.text}
-            ]
-
         if self._consume_stop_request(state, boundary="after_model"):
             return state, "end"
 
@@ -249,12 +244,34 @@ class EventDrivenAgent:
             signature = json.dumps(batch.calls, ensure_ascii=False, sort_keys=True)
             if signature == state.get("_last_tool_signature") and state.get("tool_results"):
                 state["response"] = self._last_tool_output(state)
+                state["streamed_response"] = ""
                 state["finished"] = True
                 state["finish_reason"] = "repeated_tool_call"
+                self._emit(
+                    AgentEvent(
+                        type="item.completed",
+                        stage="main",
+                        item_type="message",
+                        content=state["response"],
+                        payload={"content": state["response"], "streamed": False},
+                    )
+                )
                 return state, "end"
             state["_last_tool_signature"] = signature
             state["tool_calls"] = batch.calls
+            state["messages"] = list(state.get("messages", [])) + [
+                {
+                    "role": "assistant",
+                    "content": batch.text,
+                    "tool_calls": [dict(call) for call in batch.calls],
+                }
+            ]
             return state, "tool_batch"
+
+        if batch.text:
+            state["messages"] = list(state.get("messages", [])) + [
+                {"role": "assistant", "content": batch.text}
+            ]
 
         # 没有工具可作为纠偏边界时，在结束或反思前兜底应用用户输入。
         if self._apply_pending_steering(state, boundary="before_finish"):
@@ -444,7 +461,12 @@ class EventDrivenAgent:
         dumped = result.model_dump()
         state["tool_results"] = list(state.get("tool_results", [])) + [dumped]
         state["messages"] = list(state.get("messages", [])) + [
-            {"role": "tool", "content": result.to_message()}
+            {
+                "role": "tool",
+                "content": result.to_message(),
+                "tool_call_id": str(call.get("call_id") or ""),
+                "name": str(call.get("name") or result.tool_name),
+            }
         ]
         if result.status in {"error", "blocked"}:
             state["errors"] = list(state.get("errors", [])) + [
@@ -603,6 +625,7 @@ class EventDrivenAgent:
             active_skills=state.get("active_skills", []),
         )
         state["context"] = context
+        state["_runtime_context"] = self.context_builder.last_runtime_context
         state["context_usage"] = dict(self.context_builder.last_usage)
         return context
 
@@ -807,6 +830,7 @@ class EventDrivenAgent:
         persistent = [event for event in self._run_events if event.get("type") != "item.delta"]
         checkpoint = dict(state)
         checkpoint.pop("_last_tool_signature", None)
+        checkpoint.pop("_runtime_context", None)
         persistent.append(
             {
                 "type": "state.checkpoint",

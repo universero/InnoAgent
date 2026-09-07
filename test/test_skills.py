@@ -26,6 +26,21 @@ class SkillLoaderTest(unittest.TestCase):
             loaded = loader.load("code-review")
             self.assertIn("# Workflow", loaded.content or "")
             self.assertIn("code-review", loader.prompt_index())
+            self.assertNotIn(str(path), loader.prompt_index())
+
+    def test_prompt_index_bounds_long_descriptions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".agents" / "skills" / "verbose" / "SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                f"---\nname: verbose\ndescription: {'detail ' * 100}\n---\n",
+                encoding="utf-8",
+            )
+
+            index = SkillLoader(tmp, home=Path(tmp) / "home").prompt_index()
+
+            self.assertLess(len(index), 260)
+            self.assertTrue(index.endswith("…"))
 
     def test_project_skill_wins_name_collision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

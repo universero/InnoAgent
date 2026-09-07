@@ -187,6 +187,8 @@ checkpoint 是性能优化，事件重建是降级路径。事件重建当前兼
 rename 采用追加事件而不是原地修改，是为了保持日志只追加特性和审计顺序。
 当 `/rename` 发生在首个模型 turn 之前，Runtime 会创建 `session_meta` 和空状态 checkpoint，随后追加 rename。这样后续 `invoke(session_id=...)` 可以沿用名称、Goal、模式和运行预算，而不是生成第二个 session。恢复入口支持完整 id、完整名称和唯一前缀；TTY 的无参数 `/resume` 则展示候选列表，避免默认恢复到用户未确认的最近会话。
 
+模型输入分为 Runtime context 与 conversation input。前者只包含记忆、压缩摘要、计划、Skill 等运行信息；后者保留 user/assistant 消息，以及通过同一 `call_id` 配对的 `function_call` 和 `function_call_output`。工具结果如果只被拼成普通文本，模型无法可靠确认调用已经完成，容易再次调用同一工具。通用模型仍可使用扁平上下文，Responses API 客户端则优先发送结构化输入。当前用户消息已经存在于 conversation 时，不再额外重复拼接。
+
 ## 一致性与失败边界
 
 当前文件存储适合单进程本地 CLI，但存在明确限制：

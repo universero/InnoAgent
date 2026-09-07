@@ -65,6 +65,20 @@ class MainLoopTest(unittest.TestCase):
             result = runtime.invoke("读取 readme.md")
             self.assertTrue(result.get("finished"))
             self.assertIn("hello from temp", result.get("response", ""))
+            assistant_call = next(
+                message
+                for message in result["messages"]
+                if message.get("tool_calls")
+            )
+            tool_message = next(
+                message
+                for message in result["messages"]
+                if message.get("role") == "tool"
+            )
+            self.assertEqual(
+                assistant_call["tool_calls"][0]["call_id"],
+                tool_message["tool_call_id"],
+            )
 
     def test_confirm_mode_write_requires_approval_then_executes(self) -> None:
         """Verify confirm mode blocks writes until approval."""
@@ -99,6 +113,14 @@ class MainLoopTest(unittest.TestCase):
             self.assertTrue(result.get("finished"))
             self.assertEqual(result.get("response"), "its a test")
             self.assertEqual(len(result.get("tool_results", [])), 1)
+            final_messages = [
+                event
+                for event in runtime._run_events
+                if event["type"] == "item.completed"
+                and event.get("item_type") == "message"
+                and event.get("content") == "its a test"
+            ]
+            self.assertEqual(len(final_messages), 1)
 
     def test_model_response_emits_text_delta_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

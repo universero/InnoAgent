@@ -52,6 +52,20 @@ class CompressionTest(unittest.TestCase):
         self.assertEqual(context.count("structured summary"), 1)
         self.assertIn("recent request", context)
 
+    def test_context_does_not_duplicate_current_user_message(self) -> None:
+        history = SessionHistory([Message(role="user", content="read test.md")])
+        builder = ContextBuilder(max_tokens=1000)
+
+        context = builder.build(
+            "read test.md",
+            history,
+            UserProfile.default_for("default"),
+            [],
+        )
+
+        self.assertEqual(context.count("read test.md"), 1)
+        self.assertNotIn("read test.md", builder.last_runtime_context)
+
     def test_compaction_keeps_complete_recent_user_turn(self) -> None:
         messages = [
             Message(role="user", content="old request " * 20),

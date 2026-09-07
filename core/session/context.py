@@ -17,6 +17,7 @@ class ContextBuilder:
         """Store the context token budget."""
         self.max_tokens = max_tokens
         self.last_usage: dict[str, Any] = {}
+        self.last_runtime_context = ""
 
     def build(
         self,
@@ -33,14 +34,12 @@ class ContextBuilder:
     ) -> str:
         """Assemble the model context and trim history when necessary."""
         memory_text = profile.recall_text()
-        sections = [
-            f"用户输入：{user_input}",
-        ]
+        runtime_sections: list[str] = []
         if memory_text:
-            sections.append("用户记忆：\n" + memory_text)
+            runtime_sections.append("用户记忆：\n" + memory_text)
 
         if context_summary:
-            sections.append("压缩后的历史摘要：\n" + context_summary)
+            runtime_sections.append("压缩后的历史摘要：\n" + context_summary)
 
         history_messages = history.tail(40)
         if context_summary:
@@ -48,30 +47,40 @@ class ContextBuilder:
                 message for message in history_messages if message.role != "summary"
             ]
         recent_messages = trim_messages(history_messages, self.max_tokens // 3)
+        conversation_sections: list[str] = []
         if recent_messages:
             history_block = "\n".join(
-                f"{message.role}: {message.content}" for message in recent_messages[-8:]
+                f"{message.role}: {message.content}"
+                for message in recent_messages[-8:]
+                if message.content
             )
-            sections.append("最近对话：\n" + history_block)
+            if history_block:
+                conversation_sections.append("最近对话：\n" + history_block)
+        elif user_input:
+            conversation_sections.append(f"用户输入：{user_input}")
 
         if plan:
-            sections.append(self._plan_block(plan, tasks or []))
+            runtime_sections.append(self._plan_block(plan, tasks or []))
         if reflection_feedback:
-            sections.append("反思反馈：\n" + reflection_feedback)
+            runtime_sections.append("反思反馈：\n" + reflection_feedback)
 
         if skill_index:
-            sections.append(skill_index)
+            runtime_sections.append(skill_index)
         for skill in active_skills or []:
             content = str(skill.get("content") or "").strip()
             if content:
-                sections.append(
+                runtime_sections.append(
                     f"已激活 Skill: {skill.get('name', 'unknown')}\n{content}"
                 )
+
+        self.last_runtime_context = "\n\n".join(runtime_sections)
 
         tool_block = "\n".join(
             f"- {schema['name']}: {schema['description']}" for schema in tool_schemas
         )
-        sections.append("可用工具：\n" + tool_block)
+        sections = [*conversation_sections, *runtime_sections]
+        if tool_block:
+            sections.append("可用工具：\n" + tool_block)
         context = "\n\n".join(sections)
         # 最终硬截断是预算兜底；正常情况下历史裁剪应先释放大部分空间。
         if estimate_tokens(context) > self.max_tokens:

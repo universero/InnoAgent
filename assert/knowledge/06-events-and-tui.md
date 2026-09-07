@@ -129,6 +129,8 @@ Slash 命令是控制输入，不追加为普通用户消息。否则模型会�
 
 `view/resume.py` 将恢复匹配与 CLI 主类分开：`pick_session()` 依次匹配完整 session id、完整名称和唯一前缀；非 TTY 且未指定目标时仍选择最近会话。TTY 中无参数 `/resume` 展示最近 session 的名称、更新时间、id 和 Goal，再由用户选择。`resume_summary()` 只展示名称、Goal 和 Plan 状态，不复制历史正文。
 
+工具事件中的 `call_id` 使用 Provider 返回的真实值，不能用 `output_index` 替代。Runtime 将同一 ID 写入 assistant 的 `tool_calls` 和 tool message，Responses API 客户端再生成配对的 `function_call` 与 `function_call_output`。TUI 只渲染实际事件；重复调用保护仅作为异常兜底，并在触发时补发最后一次成功结果，避免界面停在没有结论的工具调用上。
+
 Session 通常在首个用户 turn 创建，但 `/rename` 可能先于任何模型调用发生。此时 CLI 调用 Runtime 创建带 checkpoint 的空 session，再追加 rename 事件。该设计使重命名始终针对明确 session，同时保留 JSONL 只追加语义；空参数 `/rename` 只返回 usage，不会创建无意义 session。
 
 ## TUI 结构
