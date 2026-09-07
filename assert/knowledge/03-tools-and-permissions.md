@@ -7,9 +7,11 @@
 ```text
 Model Tool Intent
 -> Pydantic schema validation
--> Guardrail preflight
--> Permission decision / approval
--> Tool execution
+-> canonical arguments
+-> Guardrail preflight / Permission decision
+-> ToolAuthorization
+-> allowed: Tool execution
+-> needs_confirmation: ApprovalRequest + pause
 -> Guardrail postflight
 -> output bounding
 -> ToolResult + AgentEvent + AgentState
@@ -19,8 +21,9 @@ Model Tool Intent
 
 | 文件 | 职责 |
 |---|---|
-| `core/tool/base.py` | `ToolInput`、`ToolContext`、`ToolResult`、`BaseTool` |
-| `core/tool/registry.py` | 注册、schema 暴露、Guardrail 链和批量调度 |
+| `core/tool/base.py` | `ToolCall`、`ToolSpec`、`ToolAuthorization`、`ToolResult`、`BaseTool` |
+| `core/tool/approval.py` | `ApprovalRequest`、稳定选项和 CLI decision 解析 |
+| `core/tool/registry.py` | 注册、参数规范化、授权、Guardrail 链、执行和批量调度 |
 | `core/tool/decorators.py` | 内置工具注册标记 |
 | `core/tool/search.py` | 工具较多时的轻量候选搜索 |
 | `core/tool/*_tool.py` | 每个工具的 Prompt、schema 和实现 |
@@ -50,6 +53,16 @@ Model Tool Intent
 
 `BaseTool.execute()` 统一捕获参数错误和运行异常，将其转换为 `ToolResult(status="error")`。工具异常不应击穿 LangGraph，也不能只打印到终端后消失。
 
+### `ToolSpec`
+
+`BaseTool.spec()` 同时给出模型契约和本地可信能力：name、description、parameters、`is_write`、`requires_confirmation`、`parallel_safe`。Provider adapter 只发送前三个标准 function 字段；其余字段只供 Registry、权限和界面使用，不能由模型参数伪造。
+
+### `ToolAuthorization`
+
+授权对象保存 tool name、规范化 arguments、状态、原因和 Guardrail metadata。状态只有 `allowed`、`needs_confirmation`、`blocked`、`error`。执行阶段使用授权对象中绑定的 arguments，而不是再次信任调用方传入的可变字典；工具名不匹配时直接返回 error。
+
+参数校验发生在 Guardrail 和审批之前。无效参数因此直接成为 error，不会先让用户批准一个最终无法执行的调用。工具执行时仍保留二次 schema 校验，作为扩展工具和直接调用路径的防御层。
+
 ### `ToolResult`
 
 | 字段 | 用途 |
@@ -62,16 +75,23 @@ Model Tool Intent
 
 模型主要看到 `output`，Runtime 和 UI 可以读取完整结构化字段。这样避免把大对象重复塞入模型上下文，同时保留状态更新能力。
 
-## Registry 执行链
+### `ApprovalRequest`
 
-`ToolRegistry.execute_tool()` 的顺序固定为：
+审批请求是可序列化的暂停协议，包含 request id、首个工具摘要、当前待批 calls、顺序上尚未执行的 deferred calls、reason 和结构化 options。TUI 展示 label/description，Runtime 只消费稳定 value。旧 Session 的字符串 options、`id` 字段和旧 `needs_confirmation` 事件在恢复时升级，不改变授权语义。
 
-1. 查找工具，未知工具返回错误。
-2. 逐个执行 Guardrail `before()`。
-3. 遇到 `needs_confirmation` 或 `blocked` 立即返回。
-4. 调用工具的 schema validation 和 `run()`。
-5. 逆序执行 Guardrail `after()`。
-6. 按 `max_tool_output_chars` 截断模型可见输出。
+## Registry 授权与执行链
+
+`authorize_tool()` 与 `execute_authorized()` 是两个明确阶段：
+
+1. 查找工具；未知工具返回 error authorization。
+2. 用 Pydantic 校验并规范化参数。
+3. 逐个执行 Guardrail `before()`，任一异常都 fail-closed。
+4. 返回 allowed、needs_confirmation、blocked 或 error authorization。
+5. Runtime 对 needs_confirmation 创建 `ApprovalRequest`，不产生 ToolResult。
+6. `execute_authorized()` 校验授权绑定的工具名并执行绑定参数。
+7. 逆序执行 Guardrail `after()`，再限制模型可见输出。
+
+兼容入口 `execute_tool()` 仍可把非 allowed authorization 转成旧式 ToolResult，供独立工具调用和已有集成使用；主 Runtime 不走这条审批表达方式。postflight 若异常，工具可能已经产生副作用，因此结果会明确标记 `effect_uncertain`，而不是声称操作从未执行。
 
 Guardrail 默认安装顺序：
 
@@ -122,7 +142,7 @@ SHA-256 是后续 `write.expected_sha256` 的版本标识，不代表内容安�
 
 用途：列出目录，递归深度限制为 1 到 5。
 
-递归时会展示符号链接目录，但不会进入链接目标，防止遍历逃逸和循环。输出仍会经过 Registry 的总字符上限。
+递归时会展示符号链接目录，但不会进入链接目标，防止遍历逃逸和循环。扫描过程同时受 `max_entries` 和 Runtime 字符预算约束，达到上限立即停止，不会先构造完整目录列表；Registry 仍保留最终兜底截断。
 
 ### `grep`
 
@@ -130,7 +150,7 @@ SHA-256 是后续 `write.expected_sha256` 的版本标识，不代表内容安�
 
 实现优先使用 `rg`，不可用时回退到 `grep -rn`。命令中使用 `--` 结束选项，确保以 `-` 开头的 pattern 不会被解释成参数。返回 match count、returned count 和截断 warning。
 
-当前 `max_results` 限制返回上下文，而不是停止底层搜索；超大仓库的扫描资源限制仍需单独实现。
+`rg`/`grep` stdout 逐行消费，达到 `max_results` 或字符预算后立即终止子进程，不在内存中缓存完整搜索输出。
 
 ### `shell`
 
@@ -139,10 +159,10 @@ SHA-256 是后续 `write.expected_sha256` 的版本标识，不代表内容安�
 实现使用 `subprocess.Popen(shell=True)`：
 
 - cwd 固定为首个 allowed root。
-- stdout 与 stderr 分开捕获，并在 output 中组合。
+- stdout 与 stderr 由独立 reader 持续排空，每个缓冲区只保留有界字节，并在 output 中组合有界摘要。
 - timeout 范围为 1 到 600 秒。
 - POSIX 系统使用新 session，使子进程进入独立进程组。
-- 超时后向进程组发送 `SIGKILL`，并再次 `communicate()` 回收输出。
+- 超时后向进程组发送 `SIGKILL`，等待 reader 和进程完成回收。
 - ToolResult 记录 stdout、stderr、exit code 和 timeout。
 
 Shell 仍可通过命令访问工作区外资源，也没有网络和资源隔离，因此它不是沙箱。Prompt 只能减少误用，真正的安全需要容器或 MicroVM。
@@ -183,12 +203,14 @@ schema 只允许 `read`、`ls`、`grep`，Runtime 再与注册表和只读白名
 
 ## 并行调度
 
-`execute_many()` 将调用分为两组：
+`execute_many()` 按原始顺序扫描调用：
 
-- `parallel_safe=True` 且 `is_write=False`：线程池并发。
-- 写操作、Shell、未知工具和共享状态工具：串行。
+- 相邻的 `parallel_safe=True` 且 `is_write=False` 调用组成一个并行窗口。
+- 写操作、Shell、未知工具和共享状态工具先刷新前一窗口，再串行执行，并阻止后续只读调用越过。
 
 并发结果按原始调用索引回填，而不是按完成顺序返回。模型看到稳定顺序，事件和测试也不会因线程调度产生随机变化。
+
+Runtime 按顺序授权，遇到首个 `needs_confirmation` 就停止：此前前缀可以执行，该调用成为 ApprovalRequest，后续调用保存为 deferred tail。审批恢复后先处理被阻塞调用，再继续 tail；因此 `[write, read]` 不会在 write 等待审批时提前读取旧内容。Registry 收到的 call 与 authorization 数量不一致会直接报错，避免错位授权。
 
 当前并行安全依赖工具作者声明。新增工具时必须检查：
 
@@ -218,8 +240,11 @@ schema 只允许 `read`、`ls`、`grep`，Runtime 再与注册表和只读白名
 
 - deny 优先于 allow，避免宽泛 allow 覆盖明确拒绝。
 - 文件规则保存规范化的仓库相对路径；工作区外路径保存绝对路径，但仍会被 PathGuard 拦截。
-- Shell 使用 `shlex.split()` 后的 argv 前缀匹配，不使用字符串 `startswith()`。
+- v3 Shell 规则保存原始 `command_text` 并逐字匹配。引号、转义、变量展开和命令替换形式不同，就必须重新审批。
+- v1/v2 的 argv/prefix allow 规则无法恢复原始 shell 语义，因此迁移后失效关闭；旧 deny 规则仍可通过 `shlex` 保守匹配并继续拦截。
 - 无 path 和 command 的工具按完整 arguments 匹配。
+- 权限文件带 `version: 3`，通过同目录临时文件和 `os.replace()` 原子更新。
+- 已存在的文件若 JSON 损坏、schema 非法或版本未知，权限查询返回 deny-by-default；缺少文件才表示没有持久规则。
 
 `allow_always` 不是关闭安全机制。持久 allow 只跳过确认，仍受 PathGuard、readonly 和工具 schema 限制。
 
@@ -241,9 +266,11 @@ Shell 不使用 path 参数，无法由 PathGuard 解析命令内部路径。这
 
 ## 错误与结果上限
 
-- schema 错误、未知工具和运行异常都会成为模型可见 ToolResult。
-- output 超过限制时截断并添加 warning。
-- `data` 与 metadata 当前不会统一截断，因此新增工具不能把无限大对象塞入其中。
+- schema 错误、未知工具和授权异常都会在执行前 fail-closed，并成为模型可见 error ToolResult。
+- `needs_confirmation` 只存在于授权协议；主 Runtime 不把它追加到模型消息。
+- postflight 失败会返回 `effect_uncertain`，提醒调用方副作用可能已经发生。
+- read、ls、grep 和 shell 在读取或捕获阶段就实施上限；Registry 对所有工具的 output 再做最终兜底截断并添加 warning。
+- Shell 的 `data.stdout/stderr` 同样有界；其他工具的任意 `data` 与 metadata 仍需实现者主动限制，不能塞入无限大对象。
 - 工具“成功”仅表示系统调用完成，不能证明业务目标正确。
 
 ## 扩展工具的检查清单
@@ -261,5 +288,6 @@ Shell 不使用 path 参数，无法由 PathGuard 解析命令内部路径。这
 
 - `test/test_tools.py`：schema、read/write、grep、ls、shell、Skill 和 Task 契约。
 - `test/test_permissions.py`：ask、allow once、allow always、deny 和 readonly。
+- `test/test_approval_protocol.py`：审批选项、call id、旧格式升级和 CLI aliases。
 - `test/test_parallel_tools.py`：并行执行与返回顺序。
 - `test/test_main_loop.py`：审批暂停和恢复。

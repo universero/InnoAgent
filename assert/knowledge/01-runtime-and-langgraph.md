@@ -61,17 +61,19 @@ flowchart TD
 `invoke()` 执行以下步骤：
 
 1. 新会话创建 `SessionRecord`，续接会话则从 `SessionStore` 恢复状态。
-2. 合并本轮 goal 与主动选择的 Skills。
-3. 追加用户消息，清理上一轮 pending 数据，重置 iteration 和 finish reason。
+2. 合并本轮 Goal 与主动选择的 Skills；显式重启 Goal 时先清空旧目标的执行证据。
+3. 通过 `reset_turn_scope()` 清理 Reflection 计数、错误、工具结果、一次性审批和模型临时上下文，再追加用户消息；同一 Goal 的 Plan/Task 继续保留。
 4. 生成新的 `turn_id`，标记当前 Runtime 正在执行。
 5. 发出 `turn.started`。
 6. 根据上下文预算决定是否自动压缩。
 7. 调用主图直到结束、暂停审批或达到安全边界。
-8. 发出 `turn.completed` 或 `turn.failed`。
-9. 持久化稳定事件与 `state.checkpoint`。
+8. 发出 `turn.completed` 或 `turn.failed`；所有稳定事件在 `_emit()` 时已经逐条持久化。
+9. 追加 `state.checkpoint` 作为恢复快照。
 10. 将本轮交给 Memory 更新器计数。
 
 `finally` 中始终清除 `_run_active`。这样即使模型、工具或持久化抛出意外异常，CLI 也不会永久认为 Agent 仍在运行。
+
+Goal 有独立于 Session 的执行生命周期。Session 消息和累计 usage 可以跨 Goal 保留，但 Plan、Task、Reflection、工具结果、错误及一次性授权只属于产生它们的 Goal。`restart_goal=True` 或 Goal 值发生变化时，Runtime 使用统一的 `reset_goal_scope()` 重置这些字段；`turn.started.goal_restarted` 让无 checkpoint 的事件重放保持同样语义。
 
 ## `main_agent` 节点
 
@@ -92,14 +94,17 @@ flowchart TD
 
 ## `tool_batch` 节点
 
-`_execute_tool_batch()` 将模型工具调用交给 Registry。Registry 决定并行或串行，Runtime 只负责：
+`_execute_tool_batch()` 按模型顺序取得 `ToolAuthorization`。Registry 负责参数规范化、Guardrail preflight、并行或串行调度；Runtime 负责：
 
+- 用授权阶段返回的规范化参数绑定后续审批与执行。
 - 发出每个工具结果事件。
-- 把非审批结果写入 `tool_results` 和消息历史。
-- 收集 `needs_confirmation` 调用。
-- 构造 `pending_confirmation` 与三个审批选项。
+- 把 blocked、error 和真实执行结果写入 `tool_results` 与消息历史。
+- 在首个 `needs_confirmation` 处停止，把它保存为 pending，并将后续调用保存为 deferred tail，不把审批伪造成 ToolResult。
+- 构造包含 `request_id`、calls、reason 和结构化 options 的 `ApprovalRequest`。
 - 发出 `approval.requested`，以 `approval_required` 暂停当前 turn。
 - 识别 `ask_user` 的结构化问题，写入 `pending_user_question`，以 `user_input_required` 暂停。
+
+同一批次中，审批点之前的相邻只读窗口可以并行完成；审批点之后的调用不能越过它执行。用户批准或拒绝后，Runtime 先处理该调用，再按原顺序继续 deferred tail。若前缀同时产生用户问题，两种 pending 状态都保留；审批解决后优先继续处理尚未回答的问题。
 
 等待审批或用户回答时结束本次图运行而不是阻塞 LangGraph 节点。这样 UI 可以继续响应，pending 数据也可以进入 session checkpoint。
 
@@ -107,13 +112,15 @@ flowchart TD
 
 ## 审批恢复
 
-`resolve_approval()` 从 Session 恢复 pending calls：
+`resolve_approval()` 从 Session 恢复并校验 `ApprovalRequest`。decision 必须属于请求声明的稳定选项；未知值直接失败，不允许默认放行：
 
 - `deny`：为每个调用生成 `blocked` ToolResult，模型能看到用户拒绝，而不是把调用静默丢弃。
 - `allow_once`：将调用放入 `approved_tool_calls`，仅本次 Guardrail 跳过询问。
 - `allow_always`：由 `PermissionStore` 写入仓库级规则，再重新执行调用。
 
-执行完成后先检查 stop，再应用 `after_tool` steering，最后重新进入主图。审批因此是“可恢复暂停点”，不是一条绕开正常执行链的特殊路径。
+批准时，被批准调用与 deferred tail 重新进入同一顺序调度；拒绝时先生成 blocked ToolResult，再继续 tail。执行完成后检查 stop、应用 `after_tool` steering，最后重新进入主图。审批因此是“可恢复暂停点”，不是一条绕开正常执行链的特殊路径。
+
+旧 Session 中的字符串 options 和旧 `needs_confirmation` 事件会在读取时升级为当前请求结构。兼容逻辑只负责恢复语义，不允许旧格式绕过当前 Guardrail。
 
 ## Reflection 节点
 
@@ -149,7 +156,7 @@ Runtime 使用线程锁保护 `_steering_queues` 和 `_stop_requests`。纠偏�
 | 身份 | `session_id`、`turn_id`、`user_id` | 关联事件、会话和用户 |
 | 对话 | `user_input`、`messages`、`response` | 模型可见历史和当前输出 |
 | 控制 | `next_action`、`finished`、`finish_reason`、`iteration` | 图路由与终止 |
-| 执行 | `tool_calls`、`tool_results`、`pending_tool_calls`、`pending_user_question` | 工具意图、证据和交互暂停 |
+| 执行 | `tool_calls`、`tool_results`、`pending_tool_calls`、`deferred_tool_calls`、`pending_user_question` | 工具意图、证据、顺序恢复和交互暂停 |
 | 目标 | `goal`、`plan`、`tasks`、`reflection` | 长任务闭环 |
 | 上下文 | `active_skills`、`context_summary`、`context_usage`、`usage` | 能力、压缩和预算 |
 

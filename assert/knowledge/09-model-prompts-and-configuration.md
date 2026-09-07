@@ -49,7 +49,7 @@ Provider adapter 负责协议兼容，ModelStreamConsumer 负责运行时语义�
 
 - `model`：当前模型名。
 - `instructions`：统一 `SYSTEM_PROMPT`。
-- `input`：ContextBuilder 生成的本轮上下文。
+- `input`：ContextBuilder 选出的 `_model_messages` 加 `_runtime_context`；无结构化状态时才使用扁平 context 兼容输入。
 - `tools`：Registry 提供的 function schema。
 - `reasoning.effort`：none、low、medium、high、xhigh 或 max。
 - `stream=true`。
@@ -61,11 +61,12 @@ Provider adapter 负责协议兼容，ModelStreamConsumer 负责运行时语义�
 `OpenAICompatibleModel.stream_events()` 逐行读取 `data:`：
 
 - `response.reasoning_text.delta/done` -> reasoning item。
+- `response.reasoning_summary_text.delta/done` -> reasoning summary item。
 - `response.output_text.delta/done` -> message item。
 - `response.output_item.added` -> tool call started。
 - `response.function_call_arguments.delta/done` -> 工具参数分片与完成。
 - `response.output_item.done` -> 对缺失的工具 completed 事件补偿。
-- `response.completed` -> usage 与完成原因。
+- `response.completed` -> usage 与完成原因，并从最终 `response.output` 补齐此前未发送 done 事件的 message、reasoning summary 和 function call。
 - `response.failed/incomplete` -> 统一失败事件。
 
 工具名按 output index 暂存，参数完成后解析 JSON。非法 JSON 不直接丢弃，而是保存为 `_raw`，随后由严格工具 schema 返回可观察错误。
@@ -155,6 +156,10 @@ ModelBatch
 ## 动态模型切换
 
 TTY 中的 CLI `/model` 先调用 `OpenAICompatibleModel.list_models()`，使用当前 `base_url`、`api_key` 请求 OpenAI 兼容的 `GET /models`。Adapter 兼容 `data`、`models` 和字符串/对象条目，在边界完成去重和排序，并保留当前模型作为安全回退。网络失败只显示错误，不修改活动模型。
+
+模型选择后继续使用同一选择器选择 `none`、`low`、`medium` 或 `high` reasoning effort，并用面向用户的名称和简短说明解释速度、成本与推理深度差异。模型和 effort 是一次原子配置变更：只有两步都确认后才调用 Runtime；取消任一步都不会产生半更新状态。当前模型和 effort 均在列表中标记，用户也可以只改变 effort 而保留原模型。
+
+这两个候选值属于设置操作，不是 `TurnInput`。CLI 在整个两步流程中持有模态选择器所有权，并在第一步完成后优先恢复设置任务、注册第二步，再开放下一次输入。任何模型名或 effort 都不得经过普通输入 dispatcher、用户消息展示或 Session conversation history。该约束对应 Codex 的 `ThreadSettings`/`TurnSettings` 与 `UserInputAnswer`/`TurnInput` 分离，而不是依靠内容判断某个字符串是否“像配置”。
 
 用户确认候选项后，CLI 调用 `EventDrivenAgent.update_model()`：
 

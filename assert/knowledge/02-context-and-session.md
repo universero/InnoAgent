@@ -66,28 +66,46 @@
 
 ## Context 预算
 
-当前 `estimate_tokens()` 使用字符近似，优点是无 Provider 依赖、速度稳定、测试确定；缺点是对不同语言和 tokenizer 不精确。
+ContextBuilder 在发起请求前仍使用 `estimate_tokens()` 做裁剪和越界保护，因为此时 Provider 尚未返回 usage。模型响应完成后，Runtime 立即用 Responses API 的 `input_tokens` 替换 UI 中的实际 context 占用；字符估算只保留为 `estimated_tokens` 和下一次请求的 projected usage，不再冒充实际计费数据。
 
 预算处理分三层：
 
 1. History 先按 `max_tokens // 3` 裁剪。
-2. Runtime 在接近总预算时自动触发压缩。
-3. ContextBuilder 最后按约四字符一 token 做硬截断兜底。
+2. Runtime 以最近一次 API 实测 input tokens 为基线，加上之后新增消息的估算量，得到 projected usage；达到配置阈值时自动触发压缩。
+3. ContextBuilder 将 system、完整工具 JSON Schema、结构化消息和 Runtime context 统一计入预算，最后按约四字符一 token 做硬截断兜底。
 
 硬截断不是理想策略，只用于防止构造出超大请求。生产实现应按 system、history、tools、skills、output reserve 分区预算，并使用目标模型 tokenizer。
 
-`last_usage` 记录：
+`context_usage` 记录：
 
 - `used_tokens`
 - `max_tokens`
 - `remaining_tokens`
 - `percent_used`
+- `estimated_tokens` 和 `projected_tokens`
+- `threshold_tokens` 和 `threshold_percent`
+- `source`，取值为 `response_api` 或 `estimated`
 
-这些值用于 TUI context rail，不等同于 Provider 最终计费 token。
+其中 `source=response_api` 的 `used_tokens` 来自最近一次主 Agent 响应；Planning、Reflection、Compaction 和 Subagent 的请求只进入 session usage，不覆盖主上下文占用。
+
+Session `usage` 逐个累加历史 `response.completed.usage`，包含 `requests`、`input_tokens`、`output_tokens`、`cached_tokens`、`reasoning_tokens` 和 `total_tokens`。`cached_tokens` 属于 input 子集，`reasoning_tokens` 属于 output 子集，因此不会重复加到 total。事件重建会重新累加这些响应；正常 turn 的 checkpoint 和 `turn.completed` 则保存累计快照。
 
 ## 自动与手动压缩
 
-Runtime 在历史估算 token 超过 `max_context_tokens - reserve` 时调用 `_compact_state(trigger="auto")`。用户也可以通过 `/compact` 手动触发，并提供关注点。
+Runtime 在 projected usage 达到 `max_context_tokens * compact_threshold` 时调用 `_compact_state(trigger="auto")`。用户也可以通过 `/compact [focus]` 手动触发；该命令直接调用 Runtime 压缩当前持久 Session，不会向主 Agent 发送一条伪用户消息。
+
+运行参数通过 `/context` 管理：
+
+| 命令 | 含义 |
+|---|---|
+| `/context` | 显示 API 实测占用、projected usage、阈值和累计 usage |
+| `/context max 128k` | 设置 context window |
+| `/context threshold 80%` | 按比例设置自动压缩点 |
+| `/context threshold 100k` | 按绝对 token 设置自动压缩点 |
+| `/context keep 12k` | 设置压缩后保留的最近完整历史预算 |
+| `/context reset` | 恢复默认参数 |
+
+配置保存在 `.innoagent/config.json` 的 `runtime` 对象中。保存采用 merge，不覆盖同一文件里的 API Key、Base URL、模型和 reasoning effort。修改后 Runtime 会同步更新 `ContextBuilder.max_tokens` 与 `ContextCompactor.keep_recent_tokens`，无需重启。
 
 `ContextCompactor.compact()` 的步骤：
 
@@ -100,6 +118,8 @@ Runtime 在历史估算 token 超过 `max_context_tokens - reserve` 时调用 `_
 7. 计算压缩后 token 和比例。
 
 保留完整 turn 的原因是工具结果往往依赖前面的用户问题。只按 token 截断可能留下“工具输出存在但不知道为什么调用”的不可恢复上下文。
+
+`Message` 会保留 assistant 的 `tool_calls` 以及 tool message 的 `tool_call_id`、`name`。ContextBuilder 把裁剪后的结构写入 `last_messages`，Runtime 再保存为 `_model_messages`；Responses adapter 只发送这组消息和 `_runtime_context`，不会因为 `state.messages` 存在就绕过预算。压缩前后的序列化同样保留这些字段，因此 function call 与 function call output 始终可以配对。
 
 ## 压缩摘要契约
 
@@ -119,7 +139,7 @@ Runtime 在历史估算 token 超过 `max_context_tokens - reserve` 时调用 `_
 - 保存密钥原文。
 - 用模型推断替代环境事实。
 
-压缩完成会发出包含 `tokens_before`、`tokens_after`、`compression_ratio` 和 `trigger` 的事件。Session 只保留稳定完成事件，不保存流式 delta。
+压缩完成会发出包含 `tokens_before`、`tokens_after`、`compression_ratio`、`trigger` 和压缩后 `context_usage` 的事件。Session 只保留稳定完成事件，不保存流式 delta。
 
 ## Session 文件结构
 
@@ -148,17 +168,25 @@ JSONL 的选择基于本地 CLI 需求：追加简单、可人工检查、单行
 
 因此持久层保存 completed item、审批、纠偏、压缩和 turn 生命周期。最终语义足以重建会话，实时细节由当前 TUI 消费。
 
+`approval.requested` 的 payload 保存完整 `ApprovalRequest`，包括 request id、calls、deferred calls、reason 和结构化 options。事件重放直接恢复 pending approval 及其后续顺序；旧版字符串 options 与旧 `needs_confirmation` 事件会先升级为当前内存结构。升级只重建待处理意图，真正恢复执行时仍重新进行当前版本的 schema 与 Guardrail 校验。
+
 ## Checkpoint 与事件重建
 
-`_save_session()` 将本轮非 delta 事件追加到文件，并追加完整 `state.checkpoint`。加载时：
+`_emit()` 在每个稳定非 delta 事件产生时立即追加 JSONL；`_save_session()` 只追加完整 `state.checkpoint`。因此模型解析异常或 turn 中途崩溃时，已经展示的 completed、tool、approval 和 `turn.failed` 事件不会全部滞留在内存。加载时：
 
 1. 顺序读取全部 JSONL 行。
 2. 合并 `session_meta` 和 rename 信息。
 3. 选择最后一个合法 checkpoint。
-4. 若 checkpoint 存在，直接恢复。
-5. 若缺失，则 `_reconstruct_state()` 从稳定事件构造最小 AgentState。
+4. 从 checkpoint 恢复后，继续重放它之后的稳定事件。
+5. 若缺失 checkpoint，则 `_reconstruct_state()` 从全部稳定事件构造最小 AgentState。
 
 checkpoint 是性能优化，事件重建是降级路径。事件重建当前兼容新旧两套事件形态，因此代码较长；新增事件时必须明确它是否影响恢复状态。
+
+状态重建和界面历史回放不能混为一谈。`SessionStore.load()` 使用 checkpoint 加后续事件恢复最新 AgentState，目标是让 Runtime 能继续执行；TUI `/resume` 则读取 JSONL 中的稳定事件，筛选最近 20 个 turn、最多 300 个可见事件，按原顺序重新写入 terminal scrollback，目标是让用户看到之前发生过什么。UI 回放不重新执行工具，也不修改恢复后的 State。
+
+历史 `item.completed:message/reasoning` 可能带有 `streamed=true`，表示它在原进程中已经通过 delta 显示。但 delta 按设计不持久化，因此 UI 回放会在副本上把该标记改为 `false`，再渲染 completed 正文；原始事件不修改。`session_meta`、checkpoint、`response.completed` 等 bookkeeping 不进入 transcript，避免暴露内部状态或重复最终响应。
+
+`turn.started` 同时保存 `user_input`、`goal` 和 `goal_restarted`。重放遇到 Goal 切换或显式重启时，必须先清除旧 Plan、Task、Reflection、工具结果和错误，再应用新 turn；否则缺失 checkpoint 时会把旧目标证据错误地归入新目标。
 
 ## 恢复范围
 
@@ -171,7 +199,7 @@ checkpoint 是性能优化，事件重建是降级路径。事件重建当前兼
 - pending user question 及其候选项。
 - 压缩摘要。
 - 已应用 steering。
-- goal、finish reason 和基本 usage 状态。
+- goal、finish reason、usage 和 context usage。
 
 它不会可靠恢复进程内部线程、正在执行的系统调用、Provider 连接或未落盘的 delta。恢复是从稳定边界继续，不是把机器指令级执行现场冻结后恢复。
 
@@ -187,7 +215,11 @@ checkpoint 是性能优化，事件重建是降级路径。事件重建当前兼
 rename 采用追加事件而不是原地修改，是为了保持日志只追加特性和审计顺序。
 当 `/rename` 发生在首个模型 turn 之前，Runtime 会创建 `session_meta` 和空状态 checkpoint，随后追加 rename。这样后续 `invoke(session_id=...)` 可以沿用名称、Goal、模式和运行预算，而不是生成第二个 session。恢复入口支持完整 id、完整名称和唯一前缀；TTY 的无参数 `/resume` 则展示候选列表，避免默认恢复到用户未确认的最近会话。
 
+Session 候选的主标签使用名称或 id，说明列只展示本地更新时间和最近一次用户输入，并对长输入截断。这样不会重复 id，也不会把可能长期不变的 Goal 误当作会话最近内容；最近输入优先读取 `state.user_input`，缺失时回退到最后一条 user message。
+
 模型输入分为 Runtime context 与 conversation input。前者只包含记忆、压缩摘要、计划、Skill 等运行信息；后者保留 user/assistant 消息，以及通过同一 `call_id` 配对的 `function_call` 和 `function_call_output`。工具结果如果只被拼成普通文本，模型无法可靠确认调用已经完成，容易再次调用同一工具。通用模型仍可使用扁平上下文，Responses API 客户端则优先发送结构化输入。当前用户消息已经存在于 conversation 时，不再额外重复拼接。
+
+活动 Goal 属于稳定 Runtime context，每轮以“当前目标”单独注入，不能只依赖较早的用户消息。`/goal <text>` 还会把同一文本作为当前 turn 的用户消息，因此首轮意图清晰，后续工具循环和恢复运行也不会丢失目标。
 
 ## 一致性与失败边界
 

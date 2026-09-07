@@ -13,7 +13,7 @@
 - 设置 Goal 后，主回答结束前进入 Reflection；未完成时可生成反馈并回到主 Agent。
 - 文件、目录、搜索、Shell、Task、Plan、Skill 和 Subagent 工具已注册到统一 Tool Registry。
 - 权限支持 `ask`、`auto`、`readonly`，审批支持允许一次、当前工作区持续允许和拒绝。
-- 同一批只读工具可并行执行，写工具保持串行；Subagent 当前仍串行。
+- 相邻的独立只读工具可并行执行，写工具和审批点保持顺序屏障；Subagent 当前仍串行。
 - Session 使用 JSONL 保存事件和快照；LangGraph 使用进程内 `InMemorySaver` 保存图检查点。
 - 上下文支持粗略 token 估算、自动压缩、使用量事件和压缩比例事件。
 - `prompt_toolkit` TUI 支持流式输出、工具状态、审批、Goal、任务列表、slash 命令和执行中纠偏。
@@ -401,7 +401,7 @@ Shell 和代码执行迁移到受限环境，默认策略应为：
 
 - 所有工具调用必须经过 Tool Registry，不允许节点直接绕过权限执行副作用。
 - 所有用户可见状态变化必须有 AgentEvent，TUI 不自行推断运行时事实。
-- ToolResult 保持结构化，错误、截断、审批和取消不能只编码在自然语言中。
+- ToolResult 保持结构化；错误、截断和取消不能只编码在自然语言中，审批则使用独立 `ApprovalRequest` 协议，不能伪装成 ToolResult。
 - Goal、Plan、Task、Reflection 各有单一状态来源，标题文本不应长期充当稳定标识。
 - Prompt 集中管理并可版本化；工具 Prompt 与实现共址，但通过文件级常量集中声明。
 - 子 Agent 权限不高于父级授权，且默认最小化传递上下文。

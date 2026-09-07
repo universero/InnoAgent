@@ -18,8 +18,10 @@ flowchart LR
     View --> Runtime[EventDrivenAgent]
     Runtime --> Graph[LangGraph 主图]
     Graph --> Model[模型适配层]
-    Graph --> Tools[Tool Registry]
-    Tools --> Guards[Guardrails / Permissions]
+    Graph --> Auth[Tool authorization]
+    Auth -->|allowed| Tools[Tool execution]
+    Auth -->|needs confirmation| Approval[ApprovalRequest]
+    Tools --> Guards[Postflight / output bounds]
     Graph --> Stages[Planning / Reflection 子图]
     Runtime --> Context[Context / Compression / Memory]
     Runtime --> Session[JSONL Events / Checkpoint]
@@ -30,8 +32,9 @@ flowchart LR
 一次完整执行遵循以下闭环：
 
 ```text
-读取状态 -> 编译上下文 -> 模型决策 -> 参数与权限检查 -> 执行动作
--> 记录结果 -> 应用用户纠偏 -> 验证目标 -> 持久化 -> 结束或继续
+读取状态 -> 编译上下文 -> 模型决策 -> 参数规范化 -> 授权
+-> 审批暂停或执行 -> 记录结果 -> 应用用户纠偏 -> 验证目标
+-> 持久化 -> 结束或继续
 ```
 
 ## 模块覆盖地图
@@ -41,7 +44,7 @@ flowchart LR
 | `core/agent` | 主图、模型事件消费、Planning/Reflection stage、Subagent | [运行时与 LangGraph](01-runtime-and-langgraph.md)、[规划与反思](04-planning-and-reflection.md)、[Skills 与 Subagent](05-skills-and-subagents.md) |
 | `core/runtime` | 状态、运行配置、模型配置、兼容 facade | [运行时与 LangGraph](01-runtime-and-langgraph.md)、[模型、提示词与配置](09-model-prompts-and-configuration.md)、[入口与兼容层](11-entrypoints-and-compatibility.md) |
 | `core/session` | History、Context、压缩、JSONL session | [上下文与会话](02-context-and-session.md) |
-| `core/tool` | 工具契约、注册、搜索、并行调度、内置工具 | [工具与权限](03-tools-and-permissions.md) |
+| `core/tool` | ToolSpec、授权/审批协议、注册、并行调度、内置工具 | [工具与权限](03-tools-and-permissions.md) |
 | `core/guardrails`、`core/config` | 路径、模式、审批与持久权限规则 | [工具与权限](03-tools-and-permissions.md) |
 | `core/planning`、`core/reflection` | Plan/Task schema、校验、目标证据判断 | [规划与反思](04-planning-and-reflection.md) |
 | `core/skill` | Skill 发现、元数据索引、渐进加载 | [Skills 与 Subagent](05-skills-and-subagents.md) |
@@ -78,9 +81,10 @@ flowchart LR
 
 - 主 Agent 的控制循环只存在于 LangGraph，不再维护第二套隐藏 ReAct while-loop。
 - 模型只能提出工具意图；参数校验、权限、并发、执行和错误归一化由代码完成。
+- 审批是授权暂停，不是工具执行结果；未获授权的调用不能产生伪 ToolResult。
 - `AgentState` 是运行状态真值，Context 只是一次模型调用的有预算投影。
 - 工具返回成功只证明调用完成，不证明用户目标完成；Goal 必须经过 Reflection 和证据检查。
-- 只读且无共享写入的工具才允许并行，写操作、Shell 和共享模型通道保持串行。
+- 只有相邻且无共享写入的只读工具才允许并行；写操作、Shell、审批点和共享模型通道都是顺序屏障。
 - 审批、纠偏、压缩和结束必须产生稳定事件，不能只存在于 UI 文本中。
 - 用户纠偏默认在当前工具批次结束后应用，不强杀可能已经产生副作用的操作。
 - Session checkpoint 用于加速恢复，稳定事件用于审计和降级重建，两者不能互相替代。

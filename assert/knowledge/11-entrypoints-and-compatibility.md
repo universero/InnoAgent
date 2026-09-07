@@ -114,13 +114,13 @@ domain modules -X-> view
 
 ## 版本与发布边界
 
-当前项目尚未定义：
+当前项目尚未定义统一的公共协议版本。只有权限文件已有 `version: 3`；审批 payload 通过读取时升级保持兼容。仍待定义：
 
 - Runtime 公共 API 版本。
-- Session schema version。
+- Session schema version 和正式 migration registry。
 - AgentEvent protocol version。
 - Skill format version。
-- 配置迁移规则。
+- 其他配置迁移规则。
 
 在提供插件或服务端集成前，应先稳定这些边界。否则兼容类和旧事件解析会持续累积条件分支。
 

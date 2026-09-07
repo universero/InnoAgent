@@ -54,14 +54,17 @@ core/
 ├── reflection/                Reflection schema 与 fallback
 ├── session/                   context / compression / JSONL
 ├── skill/loader.py            Skill 渐进加载
-├── tool/                      工具与并行调度
+├── tool/
+│   ├── approval.py            结构化审批请求与稳定决策
+│   ├── base.py                ToolCall / Spec / Authorization / Result
+│   └── registry.py            参数校验、授权、并行调度与执行
 └── prompts.py                 集中的系统阶段提示词
 view/
 ├── cli.py                     异步 REPL 与 slash 命令
 ├── render.py                  事件和状态渲染
 ├── terminal.py                内联 Prompt、输入调度和线程安全输出
 ├── tui_render.py              TUI 事件与状态展示模型
-└── tui_theme.py               颜色主题与语义高亮
+└── tui_theme.py               亮色/深色主题、环境检测与语义高亮
 ```
 
 ## 主 Agent
@@ -90,11 +93,12 @@ flowchart TD
 
 `tool_batch` 节点负责：
 
-1. 参数校验、路径限制和权限 preflight。
-2. 并行执行独立只读工具。
-3. 串行执行写工具和 shell。
-4. 产生结构化 tool result。
-5. 在工具批次完成后应用默认用户纠偏。
+1. 在审批前校验并规范化参数。
+2. 按模型顺序校验并授权，遇到首个待审批调用立即形成顺序屏障。
+3. 将该调用保存为 `ApprovalRequest`，后续调用作为 deferred tail 等待恢复，不伪造 tool result。
+4. 仅相邻且独立的只读工具可以并行；写工具、shell 和控制工具前后都不重排。
+5. 按原始调用顺序产生结构化 tool result。
+6. 在工具批次完成后应用默认用户纠偏。
 
 ## Plan 模式
 
@@ -119,6 +123,8 @@ flowchart LR
 Plan 模式只负责“制定和修订计划”，不直接修改文件或执行 shell。计划产生后，控制权回到主 Agent。
 
 ## Reflection 模式
+
+执行 `/goal <text>` 会设置 Goal，并立即把同一段文本作为本轮用户请求启动 Agent；不需要再输入“执行”。Goal 同时保存在 Runtime state，并作为稳定的“当前目标”注入每次模型上下文。重新执行 `/goal <text>` 会清空旧 Goal 的 Plan、Task、Reflection、工具结果和错误证据，再开始新的目标闭环。`/goal` 仅查看，`/goal off` 仅清除，二者都不调用模型。
 
 设置 goal 后，主模型准备结束时必须进入 Reflection 子图：
 
@@ -188,6 +194,7 @@ turn.started
 item.started
 item.delta
 item.completed
+response.completed
 approval.requested
 approval.resolved
 steering.queued
@@ -200,7 +207,7 @@ turn.completed
 turn.failed
 ```
 
-`item.delta` 仅用于流式显示，completed、审批、纠偏、压缩和 turn 事件写入 JSONL。
+`item.delta` 仅用于流式显示；每个 completed、审批、纠偏、压缩和 turn 事件在发出时立即追加到 JSONL，`state.checkpoint` 只负责保存恢复快照。
 
 ## 权限与安全
 
@@ -208,16 +215,16 @@ turn.failed
 - `auto`：不逐次询问，但路径边界和持久 deny 仍生效。
 - `readonly`：阻止写工具和 shell。
 - `allow_once`：仅批准当前调用。
-- `allow_always`：规则写入 `.innoagent/permissions.json`。
+- `allow_always`：规则原子写入 `.innoagent/permissions.json`；文件按规范化路径匹配，shell 按原始命令字符串逐字匹配，保留引号、转义和展开语义。
 - `deny`：不执行，并把拒绝结果返回模型。
 
-文件工具只能访问配置的 workspace。shell 仍使用系统 shell，不是容器或 OS 级沙箱；`auto` 模式只应在可信仓库使用。
+无效审批值、Guardrail 异常和授权错配都会 fail-closed。文件工具只能访问配置的 workspace。shell 仍使用系统 shell，不是容器或 OS 级沙箱；`auto` 模式只应在可信仓库使用。
 
 ## Context、压缩和 Usage
 
-Context 包含 system prompt、最近完整 turn、压缩摘要、goal、plan/tasks、Skill 索引和激活的 Skill。
+Context 包含 system prompt、最近完整 turn、压缩摘要、goal、plan/tasks、Skill 索引和激活的 Skill。Responses 请求只发送 ContextBuilder 选中的 `_model_messages`，不会绕过预算重新读取完整 Session 历史；Subagent 也显式注入独立的 role 与只读系统约束。
 
-达到预算阈值后，旧历史会被结构化摘要替换，同时保留最近完整用户轮次。压缩事件包含：
+达到预算阈值后，旧历史会被结构化摘要替换，同时保留最近完整用户轮次以及 assistant tool call 与 tool output 的 `call_id` 配对。压缩事件包含：
 
 ```text
 tokens_before
@@ -226,7 +233,20 @@ compression_ratio
 trigger
 ```
 
-Usage 汇总主模型、Planning、Reflection、Compaction 和 Subagent 的 input/output/reasoning tokens。
+Usage 只累加每个 `response.completed` 中由 Responses API 返回的真实数据，覆盖主模型、Planning、Reflection、Compaction 和 Subagent。会话统计包含请求次数以及 input、output、cached、reasoning、total tokens；checkpoint 缺失时也能从历史响应事件重新汇总。
+
+Context rail 优先使用最近一次主 Agent 响应的 `input_tokens`，并明确标记 `response_api`；模型调用前尚未获得新 usage 时，会基于该实测值与新增消息计算 projected usage。自动压缩在 projected usage 达到配置阈值时触发，`/compact [focus]` 可随时主动触发。
+
+```text
+/context                         查看 context 和 session token 统计
+/context max 128k                设置模型 context window
+/context threshold 80%           设置自动压缩阈值
+/context threshold 100k          使用绝对 token 设置阈值
+/context keep 12k                设置压缩后保留的最近历史
+/context reset                   恢复默认值
+```
+
+配置写入项目 `.innoagent/config.json` 的 `runtime` 区域；更新 runtime 或模型配置时都会合并原文件，不会互相覆盖。
 
 ## Skills 与 Subagent
 
@@ -295,16 +315,18 @@ uv run python main.py
  gpt-5 · medium  ·  ASK  ·  ~/project    1,240 tokens · 42% context
 ```
 
-模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。流式文本按完整行刷新，完成事件会补齐最后一行，避免终端重绘覆盖尚未换行的 token。输出区和底栏均继承用户终端背景；Agent 标题使用蓝色，正文使用深黑色，两行高的蓝色输入框固定在底部交互区域。底栏以蓝灰文字分组展示模型、模式、工作区、累计 token、上下文比例、Goal 和任务进度，不使用容易错位的背景色块；空闲时不显示冗余的 `Ready`，仅在执行、规划、反思或审批时显示活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
+模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。Reasoning 使用灰色斜体 `Thinking` 区块，最终正文使用高对比度 `Agent` 区块。Markdown 支持标题、粗体、斜体、删除线、行内代码、链接、引用、列表、任务列表、分隔线、表格和 fenced code；表格会计算列宽并绘制终端边框，代码围栏会转换为带语言标签和边线的代码块。流式文本按完整行刷新，连续表格行会短暂缓冲到表格结束，其余内容立即显示；完成事件会补齐最后一行，避免终端重绘覆盖尚未换行的 token。TUI 内置亮色和深色两套语义模板，启动时依次读取 `INNOAGENT_THEME`、终端 `COLORFGBG` 和 macOS 系统外观；可以用 `INNOAGENT_THEME=light|dark` 显式覆盖。输出区和底栏继承终端背景，只给输入框和候选菜单设置局部背景，因此深色系统不会出现刺眼白块，底栏也不会产生错位色块。底栏以蓝灰文字分组展示模型、模式、工作区、累计 token、上下文比例、Goal 和任务进度；空闲时不显示冗余的 `Ready`，仅在执行、规划、反思或审批时显示活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要，并自动打开 Allow once、Always allow in this workspace、Deny 三行选择器。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
 
 输入 `/` 会自动打开命令菜单，每个候选项同时展示用途说明；继续输入 `/st`、`/mo` 等前缀时只保留匹配命令。`/mode`、`/approve`、`/goal` 和 `/steer` 提供静态参数补全，`/resume` 和 `/skill` 会读取当前 session 与 Skill 生成动态候选；候选均支持前缀过滤、上下移动和 Tab 补全。执行无参数 `/resume`、`/mode` 或 `/skill` 会直接打开选择器。
 
-执行 `/model` 时，客户端使用当前 `api_key` 和 `base_url` 请求 OpenAI 兼容的 `GET /models`，随后用 `↑`、`↓` 和 `Enter` 选择模型，当前模型会被标记。模型通过 `ask_user` 提问时复用同一选择器；选择“自行输入…”后可直接在原输入框填写答案。`/rename <name>` 在首次模型调用前也可使用，Runtime 会先创建空的可恢复 session，再追加 rename 事件。
+`/resume` 候选展示更新时间和最近一次用户输入，不重复显示已经作为主标签出现的 session id，也不把 Goal 当作会话摘要。恢复后，TUI 会把最近 20 个 turn、最多 300 个可见稳定事件按原顺序写回原生 terminal scrollback，包括用户消息、Agent/Thinking、工具、Plan、Reflection、审批、压缩和 steering；大型会话因此仍能快速恢复并可直接向上滚动查看。非 TTY 模式继续输出简洁恢复摘要和最新状态。
+
+执行 `/model` 时，客户端使用当前 `api_key` 和 `base_url` 请求 OpenAI 兼容的 `GET /models`，先用 `↑`、`↓` 和 `Enter` 选择模型，再选择 No reasoning、Low、Medium 或 High 思考强度，当前选项会被标记。两步都确认后才会原子更新并持久化配置；任一步取消都保留原配置。模型通过 `ask_user` 提问时复用同一选择器；选择“自行输入…”后可直接在原输入框填写答案。`/rename <name>` 在首次模型调用前也可使用，Runtime 会先创建空的可恢复 session，再追加 rename 事件。
 
 快捷键：
 
-- `Enter`：发送任务、纠偏或审批选项。
-- `↑` / `↓`：在模型列表或问题选项中移动。
+- `Enter`：发送任务、纠偏或确认当前选项。
+- `↑` / `↓`：在审批、模型列表或问题选项中移动。
 - `Esc`：取消选择；自定义回答阶段先返回选项列表。
 - `Tab`：补全 slash 命令。
 - `Ctrl-C`：优雅退出；若 turn 正在执行，先请求在安全边界停止，再退出程序。
@@ -315,15 +337,16 @@ uv run python main.py
 ```text
 /help                         帮助
 /status                       session、goal、model、mode、usage
-/context                      context window 使用量
-/goal <text|off>              设置或清除 goal
+/context [max|threshold|keep|reset] [value]
+                              查看或配置 context window 与压缩阈值
+/goal <text|off>              设置并立即执行 goal，或清除 goal
 /plan                         显示计划
 /tasks                        显示任务
 /compact [focus]              手动压缩
 /permissions                  显示持久权限
 /mode ask|auto|readonly       权限模式
 /approve once|always|deny     处理审批
-/model                        从服务端模型列表中选择
+/model                        选择服务端模型和思考强度
 /tools                        工具列表
 /skills                       Skill 列表
 /skill <name>                 激活 Skill

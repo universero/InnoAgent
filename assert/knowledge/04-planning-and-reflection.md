@@ -94,9 +94,9 @@ Plan 关注依赖、修订和整体进度；Task 关注当前执行状态、负�
 
 1. 解析模型 JSON object。
 2. 读取 steps，拒绝空步骤集合。
-3. 按标题识别旧计划中已完成步骤。
-4. 为新步骤生成 `step_id`。
-5. 将标题依赖转换为 step id。
+3. 按标题识别旧步骤，保留已有 `step_id`；已完成步骤同时保留 status 与 result。
+4. 只为真正新增的步骤生成 `step_id`，修订沿用原 `plan_id` 和 created time。
+5. 将已知标题依赖转换为 step id；未知标题保留原值，交给 validator 明确拒绝，不能静默删除。
 6. 增加 revision，保留 summary 作为 rationale。
 7. 调用 `PlanningService._validate()`。
 8. 生成 Tasks。

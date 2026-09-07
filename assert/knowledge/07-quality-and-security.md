@@ -33,6 +33,8 @@ Agent 质量不能只看最终文字是否“像正确答案”。InnoAgent 的�
 - 文件最终内容、权限位和哈希冲突。
 - ToolResult status、metadata 和 warnings。
 - approval pending 与恢复后的调用。
+- 审批暂停不得生成伪造的 `needs_confirmation` tool message。
+- 参数必须在审批前校验，授权对象必须绑定工具名和规范化参数。
 - 事件类型、stage、call id 和顺序。
 - Plan/Task/Reflection 的结构化字段。
 - context 压缩前后 token 与最近 turn 保留。
@@ -108,9 +110,15 @@ Agent 质量不能只看最终文字是否“像正确答案”。InnoAgent 的�
 
 路径、模式、审批、持久 deny 和 Plan 前置条件由代码决定。模型无法通过修改参数字段关闭这些策略。
 
+Guardrail preflight 异常必须 fail-closed。授权 decision 不在请求选项中、授权对象与待执行工具不匹配、批量 call 与 authorization 数量不一致、权限文件损坏或版本未知时都拒绝继续。postflight 异常发生在工具可能已经执行之后，因此必须报告 uncertain effect，不能误报为“未执行”。
+
 ### 执行层
 
-只读工具并行，写操作串行；write 使用原子替换和哈希冲突检测；Shell 有超时和 POSIX 进程组清理。
+只有相邻且无副作用的只读调用可以并行，写操作、审批点和共享状态工具都是顺序屏障；write 使用原子替换和哈希冲突检测；Shell 有超时、POSIX 进程组清理和有界 stdout/stderr 捕获。
+
+Shell 持久授权按原始命令字符串逐字匹配，而不是按 `shlex` argv 匹配。原因是 `shell=True` 会解释引号、变量和命令替换，相同 argv 不代表相同执行语义；无法恢复原始文本的旧 allow 规则必须失效关闭。
+
+PathGuard 授权时把规范化 resolved path 绑定进 `ToolAuthorization.arguments`，执行阶段只消费绑定参数并再次检查 allowed root，避免重新解析可被替换的原始符号链接。它仍不是内核级 `openat`/`O_NOFOLLOW` 沙箱；具备本机并发写权限的攻击者仍可能在最终系统调用窗口替换已解析路径的父目录。
 
 ### 验证层
 
@@ -125,6 +133,12 @@ Shell 运行在宿主机，可访问当前用户权限范围内的网络、文�
 ### Session 非事务
 
 工具副作用与 checkpoint 落盘没有原子关系，崩溃后可能出现 unknown effect。需要 operation ledger 和对账，而不是自动重放。
+
+稳定事件已经在 `_emit()` 时逐条追加，能保住 turn 中途完成的事件和 `turn.failed`；但事件追加与 checkpoint、外部副作用之间仍不是单一事务。
+
+### 当前防护不是 OS Sandbox
+
+PathGuard、readonly、审批和精确权限规则只能约束受控工具路径。Shell 仍运行在当前用户权限下，工作区约束不能阻止绝对路径、网络或其他进程访问。任何文档或 UI 都不能把当前实现标记为系统级隔离。
 
 ### Prompt Injection
 
@@ -188,6 +202,7 @@ unit/integration
 
 - 新功能至少增加组件测试和一个跨模块测试。
 - 修复安全问题时增加能证明旧行为失败的回归测试。
+- 权限回归至少覆盖非法参数审批、无效 decision、精确 shell argv、旧规则升级、授权错配和事件回放。
 - 观测 sink 只能消费事件，不改变 Runtime 决策。
 - 日志字段必须经过脱敏和大小限制。
 - 性能优化不能牺牲事件顺序、权限或恢复语义。

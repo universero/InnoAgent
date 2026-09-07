@@ -143,7 +143,7 @@ tool_results
 errors
 ```
 
-它不复制父 Agent 消息历史、Plan、Memory、激活 Skill 或审批状态。Subagent Prompt 只包含 role、task 和固定只读规则。
+它不复制父 Agent 消息历史、Plan、Memory、激活 Skill 或审批状态。Subagent Prompt 只包含 role、task 和固定只读规则。Runner 将这部分写入独立 `_runtime_context`，并把局部结构化历史写入 `_model_messages`；Responses adapter 因此不会遗漏 `SUBAGENT_PROMPT` 或退回父会话历史。
 
 这种隔离的目的不是保密边界，而是：
 
