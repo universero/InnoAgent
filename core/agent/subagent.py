@@ -96,6 +96,9 @@ class SubagentRunner:
         total["reasoning_tokens"] = int(total.get("reasoning_tokens", 0)) + int(
             usage.get("reasoning_tokens", 0)
         )
+        total["cached_tokens"] = int(total.get("cached_tokens", 0)) + int(
+            usage.get("cached_tokens", 0)
+        )
         total["total_tokens"] = int(total.get("total_tokens", 0)) + int(
             usage.get("total_tokens", input_tokens + output_tokens)
         )

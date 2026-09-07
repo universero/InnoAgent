@@ -55,7 +55,12 @@ class _UsageSubagentModel(_SubagentModel):
         yield AgentEvent(
             type="response.completed",
             stage=stage,
-            usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            usage={
+                "input_tokens": 2,
+                "output_tokens": 1,
+                "total_tokens": 3,
+                "cached_tokens": 1,
+            },
         )
 
 
@@ -168,6 +173,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
             runtime = InnoAgentRuntime(self._config(tmp), model=_UsageSubagentModel())
             result = runtime.invoke("delegate inspection")
             self.assertEqual(result["usage"]["total_tokens"], 12)
+            self.assertEqual(result["usage"]["cached_tokens"], 4)
 
     def test_manual_compaction_persists_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

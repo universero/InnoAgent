@@ -88,6 +88,9 @@ class TerminalIO:
             input=app_input,
             output=app_output,
         )
+        # PromptSession 没有公开的输入窗口样式参数，只给当前输入窗口绑定局部主题，
+        # 避免通过默认样式给整个终端空白区域着色。
+        self.session.app.layout.current_window.style = "class:input"
 
     @property
     def transcript_text(self) -> str:

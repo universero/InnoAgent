@@ -189,6 +189,7 @@ Subagent 使用共享 ModelStreamConsumer，因此也会使用新模型。重绑
 - tool call 有稳定 call id。
 - 参数分片可以完整聚合。
 - usage 字段归一化为整数。
+- `input_tokens_details`、`output_tokens_details` 等 Provider 嵌套字段必须在 Adapter 边界扁平化；当前协议提取 `cached_tokens` 和 `reasoning_tokens`，非法值降级为 0，不能让统计字段中断正文响应。
 - completed 与 delta 不重复。
 - 错误和不完整响应可观察。
 - 系统 Prompt 与用户 Context 保持角色隔离。

@@ -19,6 +19,7 @@ from view.cli import InnoAgentCLI
 from view.commands import command_info, parse_command
 from view.render import render_event, render_events, render_sessions, render_state, render_tools
 from view.terminal import TerminalIO
+from view.tui_theme import TUI_STYLE
 
 
 class CliTest(unittest.TestCase):
@@ -115,6 +116,16 @@ class CliTest(unittest.TestCase):
         self.assertFalse(ui.session.app.full_screen)
         self.assertFalse(ui.session.mouse_support)
         self.assertTrue(ui.session.app.erase_when_done)
+        self.assertIsNotNone(ui.session.bottom_toolbar)
+        self.assertEqual(ui.session.app.layout.current_window.style, "class:input")
+
+    def test_inline_tui_uses_local_blue_theme_without_global_background(self) -> None:
+        rules = dict(TUI_STYLE.style_rules)
+
+        self.assertNotIn("", rules)
+        self.assertIn("#2563eb", rules["prompt"])
+        self.assertIn("#60a5fa", rules["frame.border"])
+        self.assertIn("#0f2747", rules["bottom-toolbar"])
 
     def test_tui_approval_changes_input_mode(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())

@@ -268,7 +268,7 @@ uv run python main.py
 
 ## Slash 命令
 
-真实终端默认进入内联 TUI；它不切换到 alternate screen，历史输出保留在终端原生 scrollback 中，因此可以直接用鼠标选择和复制。管道、CI 或传入自定义 input/output adapter 时自动回退为普通文本模式。
+真实终端默认进入蓝色内联 TUI；输入框与状态栏固定在终端底部，模型和工具事件写入上方原生 scrollback。它不切换到 alternate screen，因此历史输出可以直接用鼠标选择和复制。管道、CI 或传入自定义 input/output adapter 时自动回退为普通文本模式。
 
 ```text
 • InnoAgent
@@ -291,7 +291,7 @@ uv run python main.py
  gpt-5 medium · ~/project · ask · 1,240 tokens · 42% ctx · Ready
 ```
 
-模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。底栏展示模型、工作区、权限模式、累计 token、上下文比例、Goal、任务进度和活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
+模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。输出区继承用户终端背景，蓝色输入框与深蓝底栏只占底部交互区域。底栏展示模型、工作区、权限模式、累计 token、上下文比例、Goal、任务进度和活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
 
 快捷键：
 

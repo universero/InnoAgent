@@ -16,6 +16,40 @@ from core.prompts import SYSTEM_PROMPT
 from core.llm.base import BaseModelClient, ModelDecision, ToolCallDecision
 
 
+def _token_count(value: Any) -> int:
+    """将 Provider token 值安全收敛为非负整数。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
+def _normalize_usage(value: Any) -> dict[str, int]:
+    """把 Responses API 的嵌套 usage 转成内部扁平协议。"""
+    usage = value if isinstance(value, dict) else {}
+    input_tokens = _token_count(usage.get("input_tokens"))
+    output_tokens = _token_count(usage.get("output_tokens"))
+    total_value = usage.get("total_tokens")
+    total_tokens = (
+        _token_count(total_value)
+        if isinstance(total_value, int) and not isinstance(total_value, bool)
+        else input_tokens + output_tokens
+    )
+
+    input_details = usage.get("input_tokens_details")
+    output_details = usage.get("output_tokens_details")
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cached_tokens": _token_count(
+            input_details.get("cached_tokens") if isinstance(input_details, dict) else None
+        ),
+        "reasoning_tokens": _token_count(
+            output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None
+        ),
+    }
+
+
 class OpenAICompatibleModel(BaseModelClient):
     """兼容 OpenAI Responses API 的流式客户端。"""
 
@@ -212,7 +246,8 @@ class OpenAICompatibleModel(BaseModelClient):
                             },
                         )
                 elif event_type == "response.completed":
-                    usage = (data.get("response") or {}).get("usage")
+                    # Provider 可返回嵌套 details，不能直接穿透到严格事件模型。
+                    usage = _normalize_usage((data.get("response") or {}).get("usage"))
                     yield AgentEvent(
                         type="response.completed",
                         stage=stage,  # type: ignore[arg-type]

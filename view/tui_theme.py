@@ -3,38 +3,38 @@
 from prompt_toolkit.styles import Style
 
 
-# 只给输入区轻量浅色底，输出区仍使用用户终端背景。
+# 不定义全局背景色，避免 PromptSession 把终端空白区整体染色。
 TUI_STYLE = Style.from_dict(
     {
-        "": "bg:#eeeeee #242424",
-        "frame.border": "bg:#eeeeee #c8c8c8",
-        "prompt": "bg:#eeeeee #315f86 bold",
-        "prompt.busy": "bg:#eeeeee #315f86 bold",
-        "prompt.approval": "bg:#eeeeee #9a6700 bold",
-        "placeholder": "bg:#eeeeee #8a8a8a italic",
-        "toolbar": "bg:#f7f7f7 #777777",
-        "toolbar.model": "bg:#f7f7f7 #b06000",
-        "toolbar.path": "bg:#f7f7f7 #3b7a3d",
-        "toolbar.ready": "bg:#f7f7f7 #2f7d4a bold",
-        "toolbar.busy": "bg:#f7f7f7 #315f86 bold",
-        "bottom-toolbar": "bg:#f7f7f7 #777777",
-        "bottom-toolbar.text": "bg:#f7f7f7 #777777",
-        "completion-menu.completion": "bg:#ffffff #333333",
-        "completion-menu.completion.current": "bg:#dce8f2 #1f4f73 bold",
-        "completion-menu.meta.completion": "bg:#ffffff #777777",
-        "completion-menu.meta.completion.current": "bg:#dce8f2 #1f4f73",
+        "frame.border": "bg:#eff6ff #60a5fa",
+        "input": "bg:#eff6ff #0f172a",
+        "prompt": "bg:#eff6ff #2563eb bold",
+        "prompt.busy": "bg:#eff6ff #1d4ed8 bold",
+        "prompt.approval": "bg:#eff6ff #1d4ed8 bold",
+        "placeholder": "bg:#eff6ff #64748b italic",
+        "toolbar": "bg:#0f2747 #bfdbfe",
+        "toolbar.model": "bg:#0f2747 #ffffff bold",
+        "toolbar.path": "bg:#0f2747 #93c5fd",
+        "toolbar.ready": "bg:#1d4ed8 #ffffff bold",
+        "toolbar.busy": "bg:#2563eb #ffffff bold",
+        "bottom-toolbar": "bg:#0f2747 #bfdbfe",
+        "bottom-toolbar.text": "bg:#0f2747 #bfdbfe",
+        "completion-menu.completion": "bg:#eff6ff #1e3a5f",
+        "completion-menu.completion.current": "bg:#2563eb #ffffff bold",
+        "completion-menu.meta.completion": "bg:#eff6ff #64748b",
+        "completion-menu.meta.completion.current": "bg:#2563eb #dbeafe",
     }
 )
 
 
 OUTPUT_STYLE = Style.from_dict(
     {
-        "output.user": "bold",
-        "output.agent": "",
+        "output.user": "ansiblue bold",
+        "output.agent": "ansiblue bold",
         "output.thinking": "ansibrightblack italic",
         "output.tool": "ansiblue bold",
         "output.success": "ansigreen bold",
-        "output.warning": "ansiyellow bold",
+        "output.warning": "ansiblue bold",
         "output.error": "ansired bold",
         "output.plan": "ansicyan bold",
         "output.muted": "ansibrightblack",

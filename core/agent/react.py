@@ -783,6 +783,9 @@ class EventDrivenAgent:
         current["reasoning_tokens"] = int(current.get("reasoning_tokens", 0)) + int(
             usage.get("reasoning_tokens", 0)
         )
+        current["cached_tokens"] = int(current.get("cached_tokens", 0)) + int(
+            usage.get("cached_tokens", 0)
+        )
         current["total_tokens"] = int(current.get("total_tokens", 0)) + int(
             usage.get("total_tokens", input_tokens + output_tokens)
         )

@@ -75,7 +75,7 @@ class StreamingModelTest(unittest.TestCase):
             'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"path\\":\\"a.txt\\"}"}',
             'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","name":"ls"}}',
             'data: {"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\\"path\\":\\".\\"}"}',
-            'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":3},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":14}}}',
         ]
         with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
             model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
@@ -83,7 +83,35 @@ class StreamingModelTest(unittest.TestCase):
         calls = [event for event in events if event.type == "item.completed" and event.item_type == "tool_call"]
         self.assertEqual([event.tool_name for event in calls], ["read", "ls"])
         self.assertEqual(calls[0].arguments, {"path": "a.txt"})
-        self.assertEqual(events[-1].usage["total_tokens"], 14)
+        self.assertEqual(
+            events[-1].usage,
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "cached_tokens": 3,
+                "reasoning_tokens": 2,
+            },
+        )
+
+    def test_event_stream_safely_normalizes_invalid_usage_values(self) -> None:
+        lines = [
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":"bad","total_tokens":null,"input_tokens_details":[],"output_tokens_details":{"reasoning_tokens":false}}}}',
+        ]
+        with patch("core.llm.responses.httpx.stream", return_value=_FakeStreamResponse(lines)):
+            model = OpenAICompatibleModel("key", "https://example.com/v1", "test")
+            events = list(model.stream_events("inspect", []))
+
+        self.assertEqual(
+            events[-1].usage,
+            {
+                "input_tokens": 5,
+                "output_tokens": 0,
+                "total_tokens": 5,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+            },
+        )
 
     def test_json_content_is_parsed_and_not_streamed_as_raw_text(self) -> None:
         """Verify JSON content is parsed instead of printed."""
