@@ -80,6 +80,7 @@ class CliTest(unittest.TestCase):
         ui.banner("gpt-test", "medium", "/tmp/InnoAgent", "ask")
         ui.add_user_message("实现新的 TUI")
         ui.handle_event({"type": "item.delta", "item_type": "message", "delta": "处理中"})
+        ui.handle_event({"type": "response.completed"})
         ui.handle_event(
             {
                 "type": "item.completed",
@@ -128,7 +129,28 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("", rules)
         self.assertIn("#2563eb", rules["prompt"])
         self.assertIn("#60a5fa", rules["frame.border"])
-        self.assertIn("#0f2747", rules["bottom-toolbar"])
+        self.assertIn("bg:default", rules["bottom-toolbar"])
+        self.assertFalse(
+            any(
+                "bg:#" in style
+                for selector, style in TUI_STYLE.style_rules
+                if selector.startswith("toolbar") or selector.startswith("bottom-toolbar")
+            )
+        )
+
+    def test_streamed_text_survives_multiple_terminal_flushes(self) -> None:
+        ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
+
+        ui.handle_event({"type": "item.delta", "item_type": "message", "delta": "你好"})
+        ui.handle_event({"type": "item.delta", "item_type": "message", "delta": "，我是"})
+        ui.handle_event(
+            {"type": "item.delta", "item_type": "message", "delta": " InnoAgent。\n下一行"}
+        )
+        ui.handle_event({"type": "response.completed"})
+
+        self.assertIn("你好，我是 InnoAgent。", ui.transcript_text)
+        self.assertIn("下一行", ui.transcript_text)
+        self.assertEqual(ui._stream_pending, "")
 
     def test_inline_tui_only_shows_meaningful_activity(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())

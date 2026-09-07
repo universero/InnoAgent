@@ -65,6 +65,7 @@ class TerminalIO:
         self._activity = "Ready"
         self._approval: dict[str, str] | None = None
         self._stream_kind: str | None = None
+        self._stream_pending = ""
         self._transcript_text = ""
         self._model = "custom"
         self._effort = ""
@@ -293,6 +294,7 @@ class TerminalIO:
             elif action == "clear":
                 self._transcript_text = ""
                 self._stream_kind = None
+                self._stream_pending = ""
                 operations.append(([('', "\x1b[2J\x1b[H")], ""))
         return operations
 
@@ -321,16 +323,32 @@ class TerminalIO:
                 "thinking": ("·", "Thinking"),
                 "plan": ("▦", "Planning" if channel == "plan" else "Reflection"),
             }.get(kind, ("•", "Agent"))
-            operations.append(([(f"class:output.{kind}", f"{marker} {title}\n  ")], ""))
+            operations.append(([(f"class:output.{kind}", f"{marker} {title}")], "\n"))
             self._stream_kind = kind
-        operations.append(([(f"class:output.{kind}", value)], ""))
+            self._stream_pending = ""
+
+        # run_in_terminal 每次恢复 Prompt 后不会保留上一批输出的水平光标位置。
+        # 只输出完整行，尾部片段留到下一批或完成事件，避免增量 token 相互覆盖。
+        self._stream_pending += value
+        body_style = "class:output.body" if kind == "agent" else f"class:output.{kind}"
+        while "\n" in self._stream_pending:
+            line, self._stream_pending = self._stream_pending.split("\n", 1)
+            operations.append(([(body_style, f"  {line}")], "\n"))
         return operations
 
     def _close_stream(self) -> list[PrintOperation]:
         if self._stream_kind is None:
             return []
+        kind = self._stream_kind
+        pending = self._stream_pending
         self._stream_kind = None
-        return [([("", "")], "\n\n")]
+        self._stream_pending = ""
+        operations: list[PrintOperation] = []
+        if pending:
+            body_style = "class:output.body" if kind == "agent" else f"class:output.{kind}"
+            operations.append(([(body_style, f"  {pending}")], "\n"))
+        operations.append(([('', "")], "\n"))
+        return operations
 
     def _append_block(self, tone: str, title: str, body: str = "") -> list[PrintOperation]:
         operations = self._close_stream()
@@ -366,7 +384,12 @@ class TerminalIO:
             operations.extend(self._append_stream(*presentation.stream))
         if presentation.block:
             operations.extend(self._append_block(*presentation.block))
-        if event.get("type") in {"turn.completed", "turn.failed", "response.failed"}:
+        if event.get("type") in {
+            "response.completed",
+            "turn.completed",
+            "turn.failed",
+            "response.failed",
+        }:
             operations.extend(self._close_stream())
         return operations
 
@@ -436,10 +459,11 @@ class TerminalIO:
         fragments: StyleAndTextTuples = [
             ("class:toolbar.model", f" {model}"),
             ("class:toolbar.model", f" · {effort}" if effort and effort != "none" else ""),
-            ("class:toolbar.separator", "  │  "),
-            ("class:toolbar.mode", f" {mode.upper()} "),
-            ("class:toolbar.path", f"  {self._display_path(self._cwd)}"),
-            ("class:toolbar.separator", "  │  "),
+            ("class:toolbar.separator", "  ·  "),
+            ("class:toolbar.mode", mode.upper()),
+            ("class:toolbar.separator", "  ·  "),
+            ("class:toolbar.path", self._display_path(self._cwd)),
+            ("class:toolbar.separator", "    "),
             ("class:toolbar.metric", f"{tokens:,} tokens  ·  {percent:.0f}% context"),
         ]
         if goal:
@@ -452,8 +476,8 @@ class TerminalIO:
         if activity and activity.casefold() != "ready":
             fragments.extend(
                 [
-                    ("class:toolbar.separator", "  │  "),
-                    ("class:toolbar.activity", f" {activity} "),
+                    ("class:toolbar.separator", "  ·  "),
+                    ("class:toolbar.activity", activity),
                 ]
             )
         fragments.append(("class:toolbar", " "))
