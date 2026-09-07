@@ -18,7 +18,7 @@ from core.runtime.config import RuntimeConfig
 from observe.traces import TraceStore
 from test.fakes import FakeModel
 from view.cli import InnoAgentCLI
-from view.commands import command_info, parse_command
+from view.commands import CommandChoice, command_info, parse_command
 from view.render import render_event, render_events, render_sessions, render_state, render_tools
 from view.terminal import CUSTOM_INPUT_OPTION, SelectionCompleter, SelectionState, TerminalIO
 from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
@@ -55,6 +55,63 @@ class CliTest(unittest.TestCase):
             ),
             [],
         )
+
+    def test_slash_argument_completion_supports_static_and_dynamic_choices(self) -> None:
+        def options(command_name: str) -> list[CommandChoice]:
+            if command_name == "resume":
+                return [
+                    CommandChoice(
+                        value="20260907-120000-000001",
+                        display="project-alpha",
+                        description="09-07 12:00 · fix tests",
+                    )
+                ]
+            return []
+
+        ui = TerminalIO(
+            command_option_provider=options,
+            app_input=DummyInput(),
+            app_output=DummyOutput(),
+        )
+        completer = ui.session.completer
+        self.assertIsNotNone(completer)
+
+        mode = list(
+            completer.get_completions(Document("/mode re"), CompleteEvent())
+        )
+        sessions = list(
+            completer.get_completions(Document("/resume project"), CompleteEvent())
+        )
+        all_sessions = list(
+            completer.get_completions(Document("/resume "), CompleteEvent())
+        )
+
+        self.assertEqual([item.text for item in mode], ["readonly"])
+        self.assertEqual([item.text for item in sessions], ["20260907-120000-000001"])
+        self.assertEqual(sessions[0].display_text, "project-alpha")
+        self.assertEqual(len(all_sessions), 1)
+
+    def test_tab_completes_a_dynamic_resume_candidate(self) -> None:
+        with create_pipe_input() as pipe_input:
+            ui = TerminalIO(
+                command_option_provider=lambda name: [
+                    CommandChoice("session-123", "project-alpha", "recent")
+                ]
+                if name == "resume"
+                else [],
+                app_input=pipe_input,
+                app_output=DummyOutput(),
+            )
+            submitted: list[str] = []
+
+            def submit(text: str) -> None:
+                submitted.append(text)
+                ui.stop()
+
+            pipe_input.send_text("/resume pro\t\r")
+            ui.run(submit)
+
+        self.assertEqual(submitted, ["/resume session-123"])
 
     def test_non_tty_uses_plain_input_without_prompt_toolkit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -406,6 +463,32 @@ class CliTest(unittest.TestCase):
             )
             cli.terminal.set_model.assert_called_once_with("beta", "none")
 
+    def test_resume_command_uses_session_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    memory_enabled=False,
+                ),
+                model=FakeModel(),
+            )
+            record = runtime.create_session()
+            runtime.rename_session(record.session_id, "project-alpha")
+            cli = InnoAgentCLI(runtime, input_fn=lambda prompt="": "", output_fn=lambda _: None)
+            cli.terminal = MagicMock()
+            cli.terminal.select = AsyncMock(return_value=record.session_id)
+
+            asyncio.run(cli._dispatch_tui_input("/resume"))
+
+            self.assertEqual(cli.current_session_id, record.session_id)
+            cli.terminal.select.assert_awaited_once()
+            call = cli.terminal.select.await_args
+            self.assertEqual(call.args[0], "Resume session")
+            self.assertEqual(call.args[1], [record.session_id])
+            self.assertEqual(call.kwargs["labels"][record.session_id], "project-alpha")
+
     def test_render_state(self) -> None:
         """Verify final state rendering omits internal status text."""
         text = render_state(
@@ -499,6 +582,51 @@ class CliTest(unittest.TestCase):
             self.assertTrue(any("已重命名为" in line for line in output))
             cli._handle_command(parse_command("/resume"))
             self.assertTrue(any("已恢复" in line for line in output))
+
+    def test_rename_creates_an_empty_current_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    memory_enabled=False,
+                ),
+                model=FakeModel(),
+            )
+            output: list[str] = []
+            cli = InnoAgentCLI(runtime, input_fn=lambda prompt="": "", output_fn=output.append)
+
+            cli._handle_command(parse_command("/rename test-session"))
+
+            self.assertIsNotNone(cli.current_session_id)
+            record = runtime.session_store.load(str(cli.current_session_id))
+            self.assertEqual(record.name, "test-session")
+            self.assertTrue(any("test-session" in line for line in output))
+
+            cli._handle_task("hello")
+            continued = runtime.session_store.load(str(cli.current_session_id))
+            self.assertEqual(continued.name, "test-session")
+
+    def test_goal_without_argument_reports_without_clearing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    memory_enabled=False,
+                ),
+                model=FakeModel(),
+            )
+            output: list[str] = []
+            cli = InnoAgentCLI(runtime, input_fn=lambda prompt="": "", output_fn=output.append)
+            cli.current_goal = "keep this goal"
+
+            cli._handle_command(parse_command("/goal"))
+
+            self.assertEqual(cli.current_goal, "keep this goal")
+            self.assertEqual(output[-1], "goal: keep this goal")
 
     def test_cli_can_clear_goal_for_existing_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -915,6 +915,31 @@ class EventDrivenAgent:
         self._ensure_state_defaults(state)
         return state  # type: ignore[return-value]
 
+    def create_session(self, goal: str | None = None) -> SessionRecord:
+        """Create an empty resumable session for session-level commands."""
+        state, session_id = self.new_state("", goal=goal)
+        self.session_store.create(
+            SessionRecord(
+                session_id=session_id,
+                user_id="default",
+                goal=goal,
+                mode=self.config.mode,
+                state=state,
+            )
+        )
+        self.session_store.append_events(
+            session_id,
+            [
+                {
+                    "type": "state.checkpoint",
+                    "session_id": session_id,
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "state": dict(state),
+                }
+            ],
+        )
+        return self.session_store.load(session_id)
+
     def continue_session(self, session_id: str, user_input: str) -> AgentState:
         return self.invoke(user_input, session_id=session_id)
 

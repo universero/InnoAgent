@@ -168,6 +168,7 @@ checkpoint 是性能优化，事件重建是降级路径。事件重建当前兼
 - ToolResult。
 - Plan、Task 与 Reflection。
 - pending approval。
+- pending user question 及其候选项。
 - 压缩摘要。
 - 已应用 steering。
 - goal、finish reason 和基本 usage 状态。
@@ -184,6 +185,7 @@ checkpoint 是性能优化，事件重建是降级路径。事件重建当前兼
 - `load_state()`：直接取得恢复状态。
 
 rename 采用追加事件而不是原地修改，是为了保持日志只追加特性和审计顺序。
+当 `/rename` 发生在首个模型 turn 之前，Runtime 会创建 `session_meta` 和空状态 checkpoint，随后追加 rename。这样后续 `invoke(session_id=...)` 可以沿用名称、Goal、模式和运行预算，而不是生成第二个 session。恢复入口支持完整 id、完整名称和唯一前缀；TTY 的无参数 `/resume` 则展示候选列表，避免默认恢复到用户未确认的最近会话。
 
 ## 一致性与失败边界
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime.agent import InnoAgentRuntime
-from view.commands import Command, command_help_text, parse_command
+from view.commands import Command, CommandChoice, command_help_text, parse_command
 from view.render import render_event, render_sessions, render_state, render_tools
 from view.resume import pick_session, resume_summary
 from view.terminal import TerminalIO
@@ -38,7 +38,10 @@ class InnoAgentCLI:
             and sys.stdin.isatty()
             and sys.stdout.isatty()
         ):
-            self.terminal = TerminalIO(state_provider=self._tui_snapshot)
+            self.terminal = TerminalIO(
+                state_provider=self._tui_snapshot,
+                command_option_provider=self._command_options,
+            )
             self.input_fn = input
             self.output_fn = self.terminal.output
         else:
@@ -113,6 +116,16 @@ class InnoAgentCLI:
             if command.name == "model":
                 await self._select_model()
                 return
+            if command.name == "resume" and not command.args:
+                await self._select_session()
+                await self._prompt_for_user_question()
+                return
+            if command.name == "skill" and not command.args:
+                await self._select_skill()
+                return
+            if command.name == "mode" and not command.args:
+                await self._select_mode()
+                return
             if command.name in {"clear", "new"}:
                 self.terminal.clear()
             await self._run_tui_work(
@@ -158,6 +171,66 @@ class InnoAgentCLI:
             return
         self.terminal.set_model(updated.model, updated.reasoning_effort)
         self.output_fn(f"model: {updated.model} {updated.reasoning_effort}")
+
+    async def _select_session(self) -> None:
+        """Select and restore a persisted session without requiring its id."""
+        assert self.terminal is not None
+        records = await asyncio.to_thread(self.runtime.list_sessions, 100)
+        if not records:
+            self.output_fn("No resumable session found.")
+            return
+        labels = {record.session_id: record.name or record.session_id for record in records}
+        descriptions = {
+            record.session_id: self._session_choice_description(record)
+            for record in records
+        }
+        selected = await self.terminal.select(
+            "Resume session",
+            [record.session_id for record in records],
+            current=self.current_session_id,
+            labels=labels,
+            descriptions=descriptions,
+        )
+        if selected is None:
+            return
+        await self._run_tui_work(
+            lambda: self._resume_session(selected),
+            "Resuming session",
+            accepts_steering=False,
+        )
+
+    async def _select_skill(self) -> None:
+        assert self.terminal is not None
+        skills = await asyncio.to_thread(self.runtime.skill_loader.discover)
+        if not skills:
+            self.output_fn("No Skills found.")
+            return
+        selected = await self.terminal.select(
+            "Activate Skill",
+            [skill.name for skill in skills],
+            descriptions={skill.name: skill.description for skill in skills},
+        )
+        if selected is not None:
+            await self._run_tui_work(
+                lambda: self._handle_command(Command("skill", [selected], f"/skill {selected}")),
+                "Activating Skill",
+                accepts_steering=False,
+            )
+
+    async def _select_mode(self) -> None:
+        assert self.terminal is not None
+        selected = await self.terminal.select(
+            "Permission mode",
+            ["ask", "auto", "readonly"],
+            current=self.runtime.config.mode,
+            descriptions={
+                "ask": "confirm write-capable operations",
+                "auto": "run allowed operations without asking",
+                "readonly": "block write-capable operations",
+            },
+        )
+        if selected is not None:
+            self._handle_command(Command("mode", [selected], f"/mode {selected}"))
 
     async def _prompt_for_user_question(self) -> None:
         """Resolve structured model questions and continue the same session."""
@@ -351,6 +424,9 @@ class InnoAgentCLI:
         if name == "help":
             self.output_fn(HELP_TEXT)
         elif name == "goal":
+            if not args:
+                self.output_fn(f"goal: {self.current_goal or 'none'}")
+                return
             value = " ".join(args).strip()
             self.current_goal = None if value.lower() in {"", "off", "none", "clear"} else value
             self.output_fn(f"goal: {self.current_goal or 'none'}")
@@ -429,26 +505,16 @@ class InnoAgentCLI:
         elif name == "model":
             self._handle_model(args)
         elif name == "rename":
-            if not self.current_session_id:
-                self.output_fn("No active session.")
-                return
             value = " ".join(args).strip()
             if not value:
                 self.output_fn("usage: /rename <name>")
                 return
+            if not self.current_session_id:
+                self._create_current_session()
             record = self.runtime.rename_session(self.current_session_id, value)
             self.output_fn(f"session 已重命名为：{record.name}")
         elif name == "resume":
-            record = pick_session(self.runtime, args[0] if args else None)
-            if record is None:
-                self.output_fn("No resumable session found.")
-                return
-            self.current_session_id = record.session_id
-            self.current_state = record.state
-            self.current_goal = record.goal
-            self.active_skills = list(record.state.get("active_skills", []))
-            self.output_fn(resume_summary(record))
-            self.output_fn(render_state(record.state))
+            self._resume_session(" ".join(args).strip() or None)
         elif name == "sessions":
             self.output_fn(render_sessions(self.runtime.list_sessions()))
         elif name in {"clear", "new"}:
@@ -477,6 +543,58 @@ class InnoAgentCLI:
             self.output_fn(str(exc))
         else:
             self.output_fn(f"model: {updated.model} {updated.reasoning_effort}")
+
+    def _create_current_session(self) -> None:
+        record = self.runtime.create_session(goal=self.current_goal)
+        self.current_session_id = record.session_id
+        self.current_state = record.state
+
+    def _resume_session(self, query: str | None) -> None:
+        record = pick_session(self.runtime, query)
+        if record is None:
+            self.output_fn("No matching resumable session found.")
+            return
+        self.current_session_id = record.session_id
+        self.current_state = record.state
+        self.current_goal = record.goal
+        self.active_skills = list(record.state.get("active_skills", []))
+        self.output_fn(resume_summary(record))
+        rendered = render_state(record.state)
+        if rendered:
+            self.output_fn(rendered)
+
+    def _command_options(self, command_name: str) -> list[CommandChoice]:
+        """Provide runtime-backed argument completions for slash commands."""
+        if command_name == "resume":
+            return [
+                CommandChoice(
+                    value=record.session_id,
+                    display=record.name or record.session_id,
+                    description=(
+                        "current · " if record.session_id == self.current_session_id else ""
+                    )
+                    + self._session_choice_description(record),
+                )
+                for record in self.runtime.list_sessions(limit=100)
+            ]
+        if command_name == "skill":
+            active = {item.get("name") for item in self.active_skills}
+            return [
+                CommandChoice(
+                    value=skill.name,
+                    display=skill.name,
+                    description=("active · " if skill.name in active else "")
+                    + skill.description,
+                )
+                for skill in self.runtime.skill_loader.discover()
+            ]
+        return []
+
+    @staticmethod
+    def _session_choice_description(record: Any) -> str:
+        updated = record.updated_at.astimezone().strftime("%m-%d %H:%M")
+        goal = str(record.goal or "no goal")
+        return f"{updated} · {record.session_id} · {goal}"
 
     def _plan_text(self) -> str:
         if not self.current_state:

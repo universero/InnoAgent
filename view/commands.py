@@ -21,26 +21,56 @@ class CommandSpec:
     name: str
     usage: str
     description: str
+    options: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CommandChoice:
+    """One static or runtime-provided slash-command argument."""
+
+    value: str
+    display: str = ""
+    description: str = ""
 
 
 COMMAND_SPECS = (
     CommandSpec("help", "/help", "show available commands and shortcuts"),
     CommandSpec("status", "/status", "show session, model, goal, and usage"),
     CommandSpec("context", "/context", "show context-window usage"),
-    CommandSpec("goal", "/goal <text|off>", "set or clear the active goal"),
+    CommandSpec(
+        "goal",
+        "/goal <text|off>",
+        "set or clear the active goal",
+        ("off", "clear"),
+    ),
     CommandSpec("plan", "/plan", "show the current plan"),
     CommandSpec("tasks", "/tasks", "show task progress"),
     CommandSpec("compact", "/compact [focus]", "compact the current session context"),
     CommandSpec("permissions", "/permissions", "show repository permission rules"),
-    CommandSpec("mode", "/mode ask|auto|readonly", "choose approval behavior"),
+    CommandSpec(
+        "mode",
+        "/mode ask|auto|readonly",
+        "choose approval behavior",
+        ("ask", "auto", "readonly"),
+    ),
     CommandSpec("model", "/model", "select a model from the configured provider"),
     CommandSpec("tools", "/tools", "list registered tools"),
     CommandSpec("skills", "/skills", "list discovered Skills"),
     CommandSpec("skill", "/skill <name>", "activate a Skill"),
-    CommandSpec("approve", "/approve once|always|deny", "resolve pending approval"),
-    CommandSpec("steer", "/steer [now] <instruction>", "correct a running turn"),
+    CommandSpec(
+        "approve",
+        "/approve once|always|deny",
+        "resolve pending approval",
+        ("once", "always", "deny"),
+    ),
+    CommandSpec(
+        "steer",
+        "/steer [now] <instruction>",
+        "correct a running turn",
+        ("now",),
+    ),
     CommandSpec("new", "/new", "start a new session"),
-    CommandSpec("resume", "/resume [session_id]", "resume a session"),
+    CommandSpec("resume", "/resume [id|name|prefix]", "select or resume a session"),
     CommandSpec("sessions", "/sessions", "list sessions"),
     CommandSpec("rename", "/rename <name>", "rename the current session"),
     CommandSpec("clear", "/clear", "clear the active session from the UI"),
@@ -49,6 +79,18 @@ COMMAND_SPECS = (
 )
 
 COMMAND_BY_NAME = {spec.name: spec for spec in COMMAND_SPECS}
+
+OPTION_DESCRIPTIONS = {
+    ("goal", "off"): "clear the active goal",
+    ("goal", "clear"): "clear the active goal",
+    ("mode", "ask"): "confirm write-capable operations",
+    ("mode", "auto"): "run allowed operations without asking",
+    ("mode", "readonly"): "block write-capable operations",
+    ("approve", "once"): "allow only this operation",
+    ("approve", "always"): "allow matching operations in this workspace",
+    ("approve", "deny"): "deny the pending operation",
+    ("steer", "now"): "apply before the next tool starts",
+}
 
 
 def parse_command(text: str) -> Command | None:
@@ -69,7 +111,20 @@ def command_info(name: str) -> dict[str, Any]:
         "known": spec is not None,
         "usage": spec.usage if spec else "",
         "description": spec.description if spec else "",
+        "options": list(spec.options) if spec else [],
     }
+
+
+def static_command_choices(name: str) -> list[CommandChoice]:
+    """Return command arguments that do not depend on runtime state."""
+    spec = COMMAND_BY_NAME.get(name)
+    return [
+        CommandChoice(
+            value=value,
+            description=OPTION_DESCRIPTIONS.get((name, value), ""),
+        )
+        for value in (spec.options if spec else ())
+    ]
 
 
 def command_help_text() -> str:

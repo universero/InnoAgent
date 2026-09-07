@@ -27,7 +27,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.utils import get_cwidth
 
 from core import __version__
-from view.commands import COMMAND_SPECS
+from view.commands import COMMAND_SPECS, CommandChoice, static_command_choices
 from view.tui_render import present_event
 from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
@@ -37,6 +37,7 @@ MAX_TRANSCRIPT_CHARS = 120_000
 
 SubmitHandler = Callable[[str], Awaitable[None] | None]
 StateProvider = Callable[[], dict[str, Any]]
+CommandOptionProvider = Callable[[str], list[CommandChoice]]
 PrintOperation = tuple[StyleAndTextTuples, str]
 CUSTOM_INPUT_OPTION = "自行输入…"
 
@@ -54,6 +55,8 @@ class SelectionState:
     current: str | None
     allow_custom: bool
     future: asyncio.Future[str | None]
+    labels: dict[str, str] | None = None
+    descriptions: dict[str, str] | None = None
     custom_input: bool = False
     selected_index: int = 0
 
@@ -80,14 +83,22 @@ class SelectionCompleter(Completer):
         prefix = document.text_before_cursor.casefold()
         values = self._ordered_values()
         for value in values:
-            if prefix and prefix not in value.casefold():
+            display = (self.state.labels or {}).get(value, value)
+            description = (self.state.descriptions or {}).get(value, "")
+            if prefix and not any(
+                candidate.casefold().startswith(prefix)
+                for candidate in (value, display)
+            ):
                 continue
             current = value == self.state.current
+            metadata = f"current · {description}" if current and description else (
+                "current" if current else description
+            )
             yield Completion(
                 value,
                 start_position=-len(document.text_before_cursor),
-                display=f"{value}  (current)" if current else value,
-                display_meta="current model" if current else "",
+                display=f"{display}  (current)" if current else display,
+                display_meta=metadata,
             )
 
     def _ordered_values(self) -> list[str]:
@@ -102,23 +113,57 @@ class SelectionCompleter(Completer):
 class SlashCommandCompleter(Completer):
     """Complete known slash commands by prefix and show concise descriptions."""
 
+    def __init__(self, option_provider: CommandOptionProvider | None = None) -> None:
+        self.option_provider = option_provider or (lambda _: [])
+
     def get_completions(
         self,
         document: Document,
         complete_event: CompleteEvent,
     ):
-        prefix = document.text_before_cursor
-        if not prefix.startswith("/") or any(char.isspace() for char in prefix):
+        text = document.text_before_cursor
+        if not text.startswith("/"):
             return
-        for spec in COMMAND_SPECS:
-            command = f"/{spec.name}"
-            if command.startswith(prefix.lower()):
+        if not any(char.isspace() for char in text):
+            for spec in COMMAND_SPECS:
+                command = f"/{spec.name}"
+                if not command.startswith(text.lower()):
+                    continue
                 yield Completion(
                     command,
-                    start_position=-len(prefix),
+                    start_position=-len(text),
                     display=command,
                     display_meta=spec.description,
                 )
+            return
+
+        parts = text.split(maxsplit=1)
+        command_text = parts[0]
+        argument = parts[1] if len(parts) > 1 else ""
+        command_name = command_text.lstrip("/").lower()
+        try:
+            dynamic_choices = self.option_provider(command_name)
+        except Exception:  # noqa: BLE001 - completion must never break the prompt
+            dynamic_choices = []
+        choices = static_command_choices(command_name) + dynamic_choices
+        normalized = argument.casefold()
+        seen: set[str] = set()
+        for choice in choices:
+            if choice.value in seen:
+                continue
+            seen.add(choice.value)
+            display = choice.display or choice.value
+            if normalized and not any(
+                candidate.casefold().startswith(normalized)
+                for candidate in (choice.value, display)
+            ):
+                continue
+            yield Completion(
+                choice.value,
+                start_position=-len(argument),
+                display=display,
+                display_meta=choice.description,
+            )
 
 
 class TerminalIO:
@@ -127,10 +172,12 @@ class TerminalIO:
     def __init__(
         self,
         state_provider: StateProvider | None = None,
+        command_option_provider: CommandOptionProvider | None = None,
         app_input: Input | None = None,
         app_output: Output | None = None,
     ) -> None:
         self.state_provider = state_provider or (lambda: {})
+        self._slash_completer = SlashCommandCompleter(command_option_provider)
         self._app_output = app_output
         self._submit_handler: SubmitHandler | None = None
         self._updates: SimpleQueue[tuple[str, Any]] = SimpleQueue()
@@ -156,7 +203,7 @@ class TerminalIO:
             message=self._input_prompt,
             bottom_toolbar=self._bottom_toolbar,
             placeholder=self._placeholder,
-            completer=SlashCommandCompleter(),
+            completer=self._slash_completer,
             complete_while_typing=True,
             complete_style=CompleteStyle.COLUMN,
             reserve_space_for_menu=10,
@@ -207,7 +254,7 @@ class TerminalIO:
                             completer=(
                                 SelectionCompleter(selection)
                                 if selection is not None
-                                else SlashCommandCompleter()
+                                else self._slash_completer
                             ),
                             complete_while_typing=selection is None,
                             pre_run=(
@@ -302,6 +349,8 @@ class TerminalIO:
         *,
         current: str | None = None,
         allow_custom: bool = False,
+        labels: dict[str, str] | None = None,
+        descriptions: dict[str, str] | None = None,
     ) -> str | None:
         """Open an inline Up/Down/Enter selector and wait for its result."""
         if self._selection is not None:
@@ -316,6 +365,8 @@ class TerminalIO:
             current=current if current in normalized else None,
             allow_custom=allow_custom,
             future=future,
+            labels=labels,
+            descriptions=descriptions,
             custom_input=not normalized and allow_custom,
             selected_index=(
                 normalized.index(current)
@@ -633,7 +684,11 @@ class TerminalIO:
                 if self._selection.custom_input
                 else (
                     " ↑↓ navigate  ·  Enter confirm  ·  Esc cancel"
-                    f"  ·  {self._selection.values()[self._selection.selected_index]}"
+                    "  ·  "
+                    + (self._selection.labels or {}).get(
+                        self._selection.values()[self._selection.selected_index],
+                        self._selection.values()[self._selection.selected_index],
+                    )
                 )
             )
             return [("class:toolbar.selection", hint)]
@@ -741,6 +796,21 @@ class TerminalIO:
                 return
             event.app.exit(result=value)
 
+        @bindings.add("tab", eager=True)
+        def _complete_argument(event) -> None:
+            if self._selection is not None:
+                self._move_selection(event, 1)
+                return
+            buffer = event.current_buffer
+            completions = list(
+                self._slash_completer.get_completions(
+                    buffer.document,
+                    CompleteEvent(completion_requested=True),
+                )
+            )
+            if completions:
+                buffer.apply_completion(completions[0])
+
         @bindings.add("up", eager=True)
         def _previous_selection(event) -> None:
             self._move_selection(event, -1)
@@ -774,6 +844,12 @@ class TerminalIO:
     def _move_selection(self, event: Any, offset: int) -> None:
         selection = self._selection
         if selection is None:
+            if event.current_buffer.complete_state is not None:
+                if offset < 0:
+                    event.current_buffer.complete_previous()
+                else:
+                    event.current_buffer.complete_next()
+                return
             if offset < 0:
                 event.current_buffer.history_backward()
             else:

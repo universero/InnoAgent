@@ -198,6 +198,7 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
         "max_iterations": 20,
         "errors": [],
         "pending_confirmation": None,
+        "pending_user_question": None,
         "pending_tool_calls": [],
         "denied_tool_calls": [],
         "active_skills": [],
@@ -215,6 +216,7 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
         event_type = event.get("type")
         if event_type == "turn.started":
             payload = event.get("payload") or {}
+            state["pending_user_question"] = None
             content = str(payload.get("user_input") or "")
             state["user_input"] = content
             if content:
@@ -242,10 +244,24 @@ def _reconstruct_state(events: list[dict[str, Any]], meta: dict[str, Any]) -> di
             elif item_type == "reflection":
                 state["reflection"] = payload
                 state["goal_complete"] = bool(payload.get("complete"))
+            elif item_type == "user_question":
+                state["pending_user_question"] = {
+                    "question": str(
+                        payload.get("question")
+                        or payload.get("content")
+                        or event.get("content")
+                        or ""
+                    ),
+                    "options": event.get("options") or payload.get("options") or [],
+                    "allow_custom": bool(payload.get("allow_custom", True)),
+                }
         elif event_type == "approval.requested":
             payload = event.get("payload") or {}
             state["pending_tool_calls"] = payload.get("calls") or []
             state["pending_confirmation"] = payload
+        elif event_type == "approval.resolved":
+            state["pending_tool_calls"] = []
+            state["pending_confirmation"] = None
         elif event_type == "context.compaction.completed":
             payload = event.get("payload") or {}
             state["context_summary"] = str(payload.get("summary") or "")

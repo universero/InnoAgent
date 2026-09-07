@@ -297,7 +297,9 @@ uv run python main.py
 
 模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。流式文本按完整行刷新，完成事件会补齐最后一行，避免终端重绘覆盖尚未换行的 token。输出区和底栏均继承用户终端背景；Agent 标题使用蓝色，正文使用深黑色，两行高的蓝色输入框固定在底部交互区域。底栏以蓝灰文字分组展示模型、模式、工作区、累计 token、上下文比例、Goal 和任务进度，不使用容易错位的背景色块；空闲时不显示冗余的 `Ready`，仅在执行、规划、反思或审批时显示活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
 
-输入 `/` 会自动打开命令菜单，每个候选项同时展示用途说明；继续输入 `/st`、`/mo` 等前缀时只保留匹配命令，输入参数后自动关闭命令补全。执行 `/model` 时，客户端使用当前 `api_key` 和 `base_url` 请求 OpenAI 兼容的 `GET /models`，随后用 `↑`、`↓` 和 `Enter` 选择模型，当前模型会被标记。模型通过 `ask_user` 提问时复用同一选择器；选择“自行输入…”后可直接在原输入框填写答案。
+输入 `/` 会自动打开命令菜单，每个候选项同时展示用途说明；继续输入 `/st`、`/mo` 等前缀时只保留匹配命令。`/mode`、`/approve`、`/goal` 和 `/steer` 提供静态参数补全，`/resume` 和 `/skill` 会读取当前 session 与 Skill 生成动态候选；候选均支持前缀过滤、上下移动和 Tab 补全。执行无参数 `/resume`、`/mode` 或 `/skill` 会直接打开选择器。
+
+执行 `/model` 时，客户端使用当前 `api_key` 和 `base_url` 请求 OpenAI 兼容的 `GET /models`，随后用 `↑`、`↓` 和 `Enter` 选择模型，当前模型会被标记。模型通过 `ask_user` 提问时复用同一选择器；选择“自行输入…”后可直接在原输入框填写答案。`/rename <name>` 在首次模型调用前也可使用，Runtime 会先创建空的可恢复 session，再追加 rename 事件。
 
 快捷键：
 
@@ -327,7 +329,7 @@ uv run python main.py
 /skill <name>                 激活 Skill
 /steer [now] <instruction>    执行中纠偏
 /new                          新 session
-/resume [session_id]          恢复 session
+/resume [id|name|prefix]      选择或按前缀恢复 session
 /sessions                     session 列表
 /rename <name>                重命名
 /clear                        清除当前 UI session

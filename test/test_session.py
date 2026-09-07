@@ -48,6 +48,19 @@ class SessionTest(unittest.TestCase):
             loaded = runtime.session_store.load(continued["session_id"])
             self.assertEqual(loaded.name, "我的阅读会话")
 
+    def test_session_can_be_resolved_by_unique_name_prefix(self) -> None:
+        from view.resume import pick_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._runtime(tmp)
+            record = runtime.create_session()
+            runtime.rename_session(record.session_id, "project-alpha")
+
+            matched = pick_session(runtime, "project-a")
+
+            self.assertIsNotNone(matched)
+            self.assertEqual(matched.session_id, record.session_id)
+
     def test_session_is_jsonl_with_replayable_events(self) -> None:
         """Verify session files are line-delimited JSON events."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,6 +119,38 @@ class SessionTest(unittest.TestCase):
             self.assertEqual(
                 state["messages"][-1],
                 {"role": "user", "content": "执行中用户纠偏：改为只读分析"},
+            )
+
+    def test_event_only_replay_restores_pending_user_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp) / "sessions")
+            store.create(SessionRecord(session_id="question-replay"))
+            store.append_events(
+                "question-replay",
+                [
+                    {
+                        "type": "item.completed",
+                        "item_type": "user_question",
+                        "content": "Choose a target",
+                        "options": ["web", "cli"],
+                        "payload": {"allow_custom": True},
+                    },
+                    {
+                        "type": "turn.completed",
+                        "payload": {"finish_reason": "user_input_required"},
+                    },
+                ],
+            )
+
+            state = store.load_state("question-replay")
+
+            self.assertEqual(
+                state["pending_user_question"],
+                {
+                    "question": "Choose a target",
+                    "options": ["web", "cli"],
+                    "allow_custom": True,
+                },
             )
 
 
