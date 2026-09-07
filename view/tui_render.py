@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-from prompt_toolkit.formatted_text import StyleAndTextTuples
 
 
 @dataclass(frozen=True)
@@ -77,11 +74,9 @@ def present_event(event: dict[str, Any], rendered: str = "") -> EventPresentatio
             ),
         )
     if event_type == "approval.requested":
-        name = str(event.get("tool_name") or payload.get("tool_name") or "tool")
-        return EventPresentation(
-            activity="Approval required",
-            block=("warning", f"Approval · {name}", "Choose 1, 2, or 3 below."),
-        )
+        # 具体参数和选项由 TerminalIO.set_approval() 一次性展示，
+        # 避免重复卡片。
+        return EventPresentation(activity="Approval required")
     if event_type == "approval.resolved":
         return EventPresentation(
             block=("success", "Approval", str(payload.get("decision") or "resolved"))
@@ -113,102 +108,6 @@ def present_event(event: dict[str, Any], rendered: str = "") -> EventPresentatio
     if rendered:
         return EventPresentation(block=("muted", "Event", rendered))
     return EventPresentation()
-
-
-def sidebar_fragments(snapshot: dict[str, Any], model: str, mode: str) -> StyleAndTextTuples:
-    """Build the context rail from the latest stable runtime snapshot."""
-    state = snapshot.get("state") or {}
-    context = state.get("context_usage") or {}
-    usage = state.get("usage") or {}
-    percent = max(0.0, min(100.0, float(context.get("percent_used", 0))))
-    used = int(context.get("used_tokens", 0))
-    maximum = int(context.get("max_tokens", snapshot.get("max_context_tokens", 0)))
-    tasks = state.get("tasks") or []
-    goal = str(state.get("goal") or snapshot.get("goal") or "Not set")
-    session = str(snapshot.get("session_id") or "New session")
-    filled = round(percent / 100 * 18)
-    bar = "█" * filled + "░" * (18 - filled)
-    rows: StyleAndTextTuples = []
-
-    def section(title: str) -> None:
-        if rows:
-            rows.append(("", "\n"))
-        rows.append(("class:sidebar.heading", f" {title}\n"))
-
-    def value(label: str, text: str, style: str = "class:sidebar.value") -> None:
-        rows.extend(
-            [
-                ("class:sidebar.label", f" {label:<9}"),
-                (style, f"{text}\n"),
-            ]
-        )
-
-    section("SESSION")
-    value("id", clip(session, 22))
-    value("model", clip(str(snapshot.get("model") or model), 22))
-    value("mode", str(snapshot.get("mode") or mode))
-    value("tokens", str(usage.get("total_tokens", 0)))
-    section("CONTEXT")
-    rows.append(("class:sidebar.active", f" {bar} {percent:>3.0f}%\n"))
-    rows.append(("class:sidebar.label", f" {used:,} / {maximum:,} tokens\n"))
-    section("GOAL")
-    rows.append(("class:sidebar.value", f" {clip(goal, 31)}\n"))
-    section("TASKS")
-    if not tasks:
-        rows.append(("class:sidebar.label", " No active tasks\n"))
-    for task in tasks[:8]:
-        status = str(task.get("status") or "pending")
-        marker, style = {
-            "done": ("✓", "class:sidebar.good"),
-            "in_progress": ("▶", "class:sidebar.active"),
-            "blocked": ("!", "class:sidebar.blocked"),
-        }.get(status, ("·", "class:sidebar.label"))
-        rows.append((style, f" {marker} {clip(str(task.get('title') or ''), 28)}\n"))
-    if len(tasks) > 8:
-        rows.append(("class:sidebar.label", f"   +{len(tasks) - 8} more\n"))
-    return rows
-
-
-def header_fragments(cwd: str, activity: str, busy: bool) -> StyleAndTextTuples:
-    status_style = "class:header.busy" if busy else "class:header.ready"
-    return [
-        ("class:header.brand", " INNOAGENT "),
-        ("class:header.path", f"  {Path(cwd).name or cwd}"),
-        ("class:header", "  ·  "),
-        (status_style, activity),
-    ]
-
-
-def approval_fragments(approval: dict[str, str] | None) -> StyleAndTextTuples:
-    value = approval or {}
-    return [
-        ("class:approval.title", f" APPROVAL · {value.get('tool', 'tool')} "),
-        ("class:approval", f" {value.get('detail') or 'This operation needs permission.'}\n "),
-        ("class:approval.key", " 1 Allow once "),
-        ("class:approval", "  "),
-        ("class:approval.key", " 2 Always here "),
-        ("class:approval", "  "),
-        ("class:approval.key", " 3 Deny "),
-    ]
-
-
-def status_fragments() -> StyleAndTextTuples:
-    rows: StyleAndTextTuples = []
-    for key, action in (
-        ("Enter", "send"),
-        ("Tab", "complete"),
-        ("Ctrl-C", "stop"),
-        ("Ctrl-L", "clear"),
-        ("F1", "help"),
-        ("Ctrl-Q", "quit"),
-    ):
-        rows.extend(
-            [
-                ("class:status.key", f" {key}"),
-                ("class:status", f" {action} "),
-            ]
-        )
-    return rows
 
 
 def format_arguments(arguments: dict[str, Any]) -> str:

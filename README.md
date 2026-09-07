@@ -19,7 +19,7 @@ InnoAgent 是一个基于 **LangGraph** 的本地 coding agent。它以 Codex CL
 - JSONL session、重命名、恢复和列表。
 - 渐进式 Skills 与隔离的只读 Subagent。
 - 执行中 steering：工具运行时可以继续输入新的方向。
-- prompt_toolkit 全屏 TUI、slash 补全、语义化事件流和固定输入区。
+- Codex 风格的 prompt_toolkit 内联 TUI、slash 补全、语义化事件流和持续可用输入框。
 
 ## 整体架构
 
@@ -59,8 +59,8 @@ core/
 view/
 ├── cli.py                     异步 REPL 与 slash 命令
 ├── render.py                  事件和状态渲染
-├── terminal.py                TUI 生命周期、输入和缓冲区
-├── tui_render.py              TUI 事件与侧栏展示模型
+├── terminal.py                内联 Prompt、输入调度和线程安全输出
+├── tui_render.py              TUI 事件与状态展示模型
 └── tui_theme.py               颜色主题与语义高亮
 ```
 
@@ -268,29 +268,37 @@ uv run python main.py
 
 ## Slash 命令
 
-真实终端默认进入全屏 TUI；管道、CI 或传入自定义 input/output adapter 时自动回退为普通文本模式。
+真实终端默认进入内联 TUI；它不切换到 alternate screen，历史输出保留在终端原生 scrollback 中，因此可以直接用鼠标选择和复制。管道、CI 或传入自定义 input/output adapter 时自动回退为普通文本模式。
 
 ```text
-┌ INNOAGENT · workspace · Running ───────────────────────────────┐
-├ Conversation ──────────────────────┬ Context ──────────────────┤
-│ ◆ You                              │ SESSION / MODEL / MODE    │
-│   修复当前测试                      │ CONTEXT  █████░░ 42%      │
-│ ● Tool · read                      │ GOAL                      │
-│ ✓ read · success                   │ TASKS  ✓ / ▶ / · / !      │
-│ ◇ Agent                            │ KEYS                      │
-├ Approval · write [1] once [2] always [3] deny ────────────────┤
-├ Message / Steer current turn ──────────────────────────────────┤
-└ Enter send · Tab complete · Ctrl-C stop · Ctrl-L clear ───────┘
+• InnoAgent
+  gpt-5 · medium · ~/project · ask
+
+› You
+  修复当前测试
+
+↳ Tool · read
+  path=test/example.py
+✓ read · success
+  读取完成
+
+• Agent
+  已定位并修复问题。
+
+╭────────────────────────────────────────────────────────────────╮
+│ › Ask InnoAgent to do anything                                 │
+╰────────────────────────────────────────────────────────────────╯
+ gpt-5 medium · ~/project · ask · 1,240 tokens · 42% ctx · Ready
 ```
 
-左侧会话区持续展示模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件。右侧状态栏展示 session、模型、权限模式、上下文比例、累计 token、goal 和任务状态，在窄终端中会自动隐藏。Agent 执行时输入框自动切换为 steering 模式；等待审批时显示固定审批操作区。会话区支持鼠标和键盘滚动，按 `Esc` 返回输入框。
+模型文本、Thinking、工具调用和结果、Planning、Reflection、压缩及 steering 事件按时间写入原生终端滚动区。底栏展示模型、工作区、权限模式、累计 token、上下文比例、Goal、任务进度和活动状态。Agent 执行时输入提示自动切换为 `steer ›`；等待审批时展示操作摘要和三个选项，并切换为 `approve ›`。prompt_toolkit 不接管鼠标，因此选择、复制和终端滚动保持原生行为。
 
 快捷键：
 
 - `Enter`：发送任务、纠偏或审批选项。
 - `Tab`：补全 slash 命令。
 - `Ctrl-C`：请求在安全边界停止当前 turn；空闲时清空输入框。
-- `Ctrl-L`：只清空当前会话视图，不删除 session 数据。
+- `Ctrl-L`：清空当前终端可见区域，不删除 session 数据。
 - `F1`：显示命令帮助。
 - `Ctrl-Q` / 空输入时 `Ctrl-D`：退出。
 

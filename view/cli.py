@@ -62,7 +62,7 @@ class InnoAgentCLI:
             and sys.stdin.isatty()
             and sys.stdout.isatty()
         ):
-            self.terminal = TerminalIO(self._footer, self._tui_snapshot)
+            self.terminal = TerminalIO(state_provider=self._tui_snapshot)
             self.input_fn = input
             self.output_fn = self.terminal.output
         else:
@@ -466,18 +466,8 @@ class InnoAgentCLI:
             f"session_tokens: {usage.get('total_tokens', 0)}"
         )
 
-    def _footer(self) -> str:
-        state = self.current_state or {}
-        context = state.get("context_usage") or {}
-        percent = float(context.get("percent_used", 0))
-        left = max(0.0, 100.0 - percent)
-        return (
-            f" {getattr(self.runtime.model, 'model', 'custom')} | {self.runtime.config.mode} | "
-            f"{left:.0f}% context left | goal: {'set' if (state.get('goal') or self.current_goal) else 'none'} "
-        )
-
     def _tui_snapshot(self) -> dict[str, Any]:
-        """提供只读快照，供右侧状态栏按需渲染。"""
+        """提供只读快照，供内联输入框底栏按需渲染。"""
         return {
             "session_id": self.current_session_id,
             "model": getattr(self.runtime.model, "model", "custom"),

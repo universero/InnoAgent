@@ -12,9 +12,9 @@ Runtime、Session 和界面通过稳定事件解耦。Runtime 不调用 prompt_t
 | `core/agent/model_stream.py` | Provider 事件归一化为模型批次 |
 | `view/cli.py` | 输入路由、Slash 命令、后台执行和审批 |
 | `view/commands.py` | Slash 命令解析 |
-| `view/terminal.py` | prompt_toolkit Application、线程安全更新队列和输入状态 |
-| `view/tui_render.py` | 纯事件展示与 context rail 生成 |
-| `view/tui_theme.py` | 颜色、语义样式和 transcript lexer |
+| `view/terminal.py` | 内联 PromptSession、异步输入调度、线程安全输出和输入状态 |
+| `view/tui_render.py` | 事件到活动、流式片段和语义块的纯转换 |
+| `view/tui_theme.py` | 输入区与输出区分离的语义样式 |
 | `view/render.py` | 非 TTY 文本渲染与兼容事件渲染 |
 | `view/resume.py` | Session 列表与恢复后的简洁状态摘要 |
 
@@ -88,7 +88,7 @@ Provider 可能同时发送文本 delta 和最终 completed message。Adapter/Co
 
 `InnoAgentCLI` 支持两种运行方式：
 
-- TTY：启动全屏 `TerminalIO`。
+- TTY：启动保留原生 scrollback 的内联 `TerminalIO`。
 - 非 TTY、测试或脚本：使用普通 input/output 循环。
 
 TUI 输入由 `_dispatch_tui_input()` 按状态路由：
@@ -126,43 +126,56 @@ Slash 命令是控制输入，不追加为普通用户消息。否则模型会�
 
 ```mermaid
 flowchart TB
-    Header[品牌 / 工作区 / 活动状态]
-    Body[Conversation transcript] --- Rail[Context rail]
-    Approval[Approval bar]
-    Input[固定输入框]
-    Status[快捷键状态栏]
+    Events[AgentEvent] --> Scrollback[原生终端 scrollback]
+    Input[PromptSession 输入框] --> Dispatch[异步输入分发]
+    Snapshot[稳定状态快照] --> Toolbar[底部状态栏]
+    Approval[审批状态] --> InputMode[approve / steer / normal]
 ```
 
-`TerminalIO` 使用单个常驻 `prompt_toolkit.Application`，而不是每轮重新创建 prompt。这样可以保持滚动位置、补全、输入焦点和全屏布局稳定。
+`TerminalIO` 使用一个长生命周期 `PromptSession`，但每次提交后立即开始下一次 `prompt_async()`。它不使用 `full_screen=True`，不进入 alternate screen，也不维护可聚焦的只读 transcript 控件。
 
-### Conversation
+这样设计直接解决三个问题：
 
-展示用户消息、Agent 文本、reasoning、工具调用、工具结果、Plan、Reflection、压缩和 steering。工具输出通过 `compact_body()` 限制行数和字符数，防止单次命令淹没界面。
+- 输出进入终端原生 scrollback，用户可以按终端习惯选择、复制和搜索。
+- `mouse_support=False`，prompt_toolkit 不会截获鼠标并把焦点切到输出面板。
+- 输入提交后马上重新显示 Prompt；长任务在后台运行时，下一条输入可作为 steering。
 
-### Context rail
+### 滚动输出
 
-读取稳定 state snapshot，展示：
+用户消息、Agent 文本、reasoning、工具调用、工具结果、Plan、Reflection、压缩和 steering 被渲染为简洁语义块。工具输出通过 `compact_body()` 限制行数和字符数，防止单次命令淹没终端。
 
-- session id、model、mode。
-- 累计 token。
-- context 使用量和进度条。
-- 当前 goal。
-- 最多 8 个 task 及状态。
+输出区不设置全局背景色，只给标题使用少量语义色。这样既避免固定黄黑主题，也尊重用户自己的终端主题。
 
-窄终端隐藏侧栏，优先保证 transcript 和输入区可用。
+### 输入与底栏
 
-### Approval bar
+Prompt 使用浅色局部背景和三种输入语义：
 
-Pending approval 时独立展示工具和摘要，并提示三个固定选择。审批 UI 不自行执行工具，只把决策传回 Runtime。
+- 空闲：`›`，接受任务或 Slash 命令。
+- 执行中：`steer ›`，接受纠偏或 `/stop`。
+- 等待审批：`approve ›`，接受 1、2、3 或文字选项。
+
+底栏从稳定 state snapshot 读取并展示：
+
+- model 和 reasoning effort。
+- 当前工作区和权限模式。
+- 累计 token 与 context 百分比。
+- Goal 是否存在与 Task 完成数。
+- Ready、Thinking、Planning、Reflecting 或 Approval required。
+
+信息保持单行，窄终端由 prompt_toolkit 自然裁剪；详细 Goal、Plan 和 Task 通过 Slash 命令查看，避免重新引入常驻侧栏。
+
+### 审批显示
+
+Pending approval 会向 scrollback 写入一次工具名、参数摘要和三个固定选择。随后 Prompt 切换为审批模式。审批 UI 不自行执行工具，只把决策传回 Runtime；相同审批状态不会重复打印。
 
 ## 线程模型
 
-模型和工具可能阻塞，不能运行在 prompt_toolkit 渲染线程。CLI 将 Runtime 工作放到后台，`TerminalIO` 只接收线程安全 `SimpleQueue` 更新。
+模型和工具可能阻塞，不能运行在 prompt_toolkit 输入循环。CLI 通过 `asyncio.to_thread()` 执行同步 Runtime，`TerminalIO` 继续等待下一次输入。
 
-`before_render` 批量消费队列并更新 Buffer，保证：
+Runtime 事件可能来自工作线程，因此终端层先写入 `SimpleQueue`，再用事件循环中的 `_flush_async()` 合并约 10ms 内的输出，并通过 `run_in_terminal()` 暂停、打印和恢复 Prompt。这样保证：
 
-- 后台线程不直接操作 UI 控件。
-- 多个 delta 可以在一个 render cycle 合并。
+- 后台线程不直接操作 PromptSession。
+- 相邻 delta 可以批量输出，减少重绘闪烁。
 - 输入框在流式输出时仍可响应。
 - 审批和 steering 状态切换集中完成。
 
@@ -174,11 +187,11 @@ Pending approval 时独立展示工具和摘要，并提示三个固定选择。
 - `stream`：追加到当前流式块。
 - `block`：添加一个带 tone、title、body 的稳定块。
 
-Theme 使用低饱和深色背景、琥珀强调、绿色成功、蓝色工具和红色错误。样式键表达语义而不是具体控件，使未来更换终端库时仍能复用展示模型。
+Theme 将 Prompt 与输出样式分开。Prompt 只使用局部中性浅色背景；scrollback 沿用终端背景，并以绿色表示成功、蓝色表示工具、红色表示错误。样式键表达语义而不是具体控件，使未来更换终端库时仍能复用展示模型。
 
 ## 非 TTY 回退
 
-CI、管道和不支持全屏的环境使用 `view/render.py` 输出纯文本。它消费同一事件协议，忽略 delta 或内部 checkpoint，并保留工具、审批、Plan、Reflection 和压缩摘要。
+CI、管道和传入自定义 input/output adapter 的环境使用 `view/render.py` 输出纯文本。它消费同一事件协议，忽略 delta 或内部 checkpoint，并保留工具、审批、Plan、Reflection 和压缩摘要。
 
 回退模式不是次要功能，它保证：
 
@@ -199,9 +212,9 @@ CI、管道和不支持全屏的环境使用 `view/render.py` 输出纯文本。
 - 新用户可见行为先定义 AgentEvent，再实现 TUI 和文本 Renderer。
 - `item.delta` 只用于实时显示，不承担恢复语义。
 - 新 Slash 命令明确它是控制输入还是模型消息。
-- 后台任务只能写队列，不能直接改 Buffer。
+- 后台任务只能写队列，不能直接操作 PromptSession。
 - 审批、stop 和 steering 必须由 Runtime 确认，UI 不能乐观假设已生效。
-- 新增侧栏字段只能读取稳定快照，避免依赖并发中的可变对象。
+- 新增底栏字段只能读取稳定快照，避免依赖并发中的可变对象。
 
 ## 关键测试
 

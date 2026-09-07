@@ -1,73 +1,43 @@
-"""Theme and semantic lexer for the full-screen TUI."""
+"""Semantic colors for the inline terminal UI."""
 
-from __future__ import annotations
-
-from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import StyleAndTextTuples
-from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 
 
+# 只给输入区轻量浅色底，输出区仍使用用户终端背景。
 TUI_STYLE = Style.from_dict(
     {
-        "root": "bg:#0b1016 #d8dee9",
-        "header": "bg:#111923 #9aa7b7",
-        "header.brand": "bg:#e5a33b #111923 bold",
-        "header.path": "#8aa6b8",
-        "header.ready": "#79c99e bold",
-        "header.busy": "#e5a33b bold",
-        "frame.border": "#314454",
-        "transcript": "bg:#0b1016 #d8dee9",
-        "transcript.user": "#e5a33b bold",
-        "transcript.agent": "#79c99e bold",
-        "transcript.thinking": "#8aa6b8 italic",
-        "transcript.tool": "#73a7d8 bold",
-        "transcript.success": "#79c99e bold",
-        "transcript.warning": "#e5a33b bold",
-        "transcript.error": "#e06c75 bold",
-        "transcript.plan": "#d2b46f bold",
-        "transcript.muted": "#748393",
-        "sidebar": "bg:#0f161f #bac4cf",
-        "sidebar.heading": "#e5a33b bold",
-        "sidebar.label": "#748393",
-        "sidebar.value": "#d8dee9",
-        "sidebar.good": "#79c99e",
-        "sidebar.active": "#e5a33b",
-        "sidebar.blocked": "#e06c75",
-        "approval": "bg:#2a2113 #f0d49b",
-        "approval.title": "bg:#e5a33b #111923 bold",
-        "approval.key": "bg:#3a2e19 #f6c85f bold",
-        "input": "bg:#111923 #e5e9f0",
-        "input.prompt": "bg:#111923 #e5a33b bold",
-        "status": "bg:#111923 #748393",
-        "status.key": "#8aa6b8 bold",
-        "completion-menu.completion": "bg:#17222d #d8dee9",
-        "completion-menu.completion.current": "bg:#e5a33b #111923 bold",
-        "scrollbar.background": "bg:#111923",
-        "scrollbar.button": "bg:#405467",
+        "": "bg:#eeeeee #242424",
+        "frame.border": "bg:#eeeeee #c8c8c8",
+        "prompt": "bg:#eeeeee #315f86 bold",
+        "prompt.busy": "bg:#eeeeee #315f86 bold",
+        "prompt.approval": "bg:#eeeeee #9a6700 bold",
+        "placeholder": "bg:#eeeeee #8a8a8a italic",
+        "toolbar": "bg:#f7f7f7 #777777",
+        "toolbar.model": "bg:#f7f7f7 #b06000",
+        "toolbar.path": "bg:#f7f7f7 #3b7a3d",
+        "toolbar.ready": "bg:#f7f7f7 #2f7d4a bold",
+        "toolbar.busy": "bg:#f7f7f7 #315f86 bold",
+        "bottom-toolbar": "bg:#f7f7f7 #777777",
+        "bottom-toolbar.text": "bg:#f7f7f7 #777777",
+        "completion-menu.completion": "bg:#ffffff #333333",
+        "completion-menu.completion.current": "bg:#dce8f2 #1f4f73 bold",
+        "completion-menu.meta.completion": "bg:#ffffff #777777",
+        "completion-menu.meta.completion.current": "bg:#dce8f2 #1f4f73",
     }
 )
 
 
-class TranscriptLexer(Lexer):
-    """Color transcript headings without storing style metadata in the Buffer."""
-
-    _PREFIX_STYLES = {
-        "◆": "class:transcript.user",
-        "◇": "class:transcript.agent",
-        "◌": "class:transcript.thinking",
-        "●": "class:transcript.tool",
-        "✓": "class:transcript.success",
-        "!": "class:transcript.warning",
-        "×": "class:transcript.error",
-        "▦": "class:transcript.plan",
-        "·": "class:transcript.muted",
+OUTPUT_STYLE = Style.from_dict(
+    {
+        "output.user": "bold",
+        "output.agent": "",
+        "output.thinking": "ansibrightblack italic",
+        "output.tool": "ansiblue bold",
+        "output.success": "ansigreen bold",
+        "output.warning": "ansiyellow bold",
+        "output.error": "ansired bold",
+        "output.plan": "ansicyan bold",
+        "output.muted": "ansibrightblack",
+        "output.body": "",
     }
-
-    def lex_document(self, document: Document):
-        def get_line(lineno: int) -> StyleAndTextTuples:
-            line = document.lines[lineno]
-            style = self._PREFIX_STYLES.get(line[:1], "class:transcript")
-            return [(style, line)]
-
-        return get_line
+)

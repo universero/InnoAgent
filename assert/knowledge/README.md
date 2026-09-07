@@ -48,7 +48,7 @@ flowchart LR
 | `core/event` | 稳定运行时事件对象 | [事件与 TUI](06-events-and-tui.md) |
 | `core/llm`、`core/prompts.py` | 模型抽象、Responses SSE、系统阶段提示词 | [模型、提示词与配置](09-model-prompts-and-configuration.md) |
 | `core/memory` | Profile、Recall、阈值和异步更新 | [Memory](10-memory.md) |
-| `view` | Slash 命令、CLI、全屏 TUI、语义化渲染 | [事件与 TUI](06-events-and-tui.md) |
+| `view` | Slash 命令、CLI、内联 TUI、语义化渲染 | [事件与 TUI](06-events-and-tui.md) |
 | `observe`、`test` | 指标、Trace、组件与组合测试 | [质量、安全与可观测性](07-quality-and-security.md) |
 | `main.py`、`core/compat.py` | 启动装配、兼容导出和依赖噪音隔离 | [入口与兼容层](11-entrypoints-and-compatibility.md) |
 

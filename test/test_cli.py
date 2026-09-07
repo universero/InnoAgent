@@ -52,7 +52,7 @@ class CliTest(unittest.TestCase):
             self.assertIsNone(cli.terminal)
             terminal_io.assert_not_called()
 
-    def test_tui_renders_streams_tools_and_context_sidebar(self) -> None:
+    def test_inline_tui_renders_streams_tools_and_status_toolbar(self) -> None:
         ui = TerminalIO(
             state_provider=lambda: {
                 "session_id": "session-1",
@@ -100,28 +100,30 @@ class CliTest(unittest.TestCase):
                 },
             }
         )
-        ui._before_render(ui.application)
+        self.assertIn("› You", ui.transcript_text)
+        self.assertIn("• Agent", ui.transcript_text)
+        self.assertIn("↳ Tool · read", ui.transcript_text)
+        self.assertIn("✓ read · success", ui.transcript_text)
+        toolbar = "".join(text for _, text in ui._bottom_toolbar())
+        self.assertIn("42% ctx", toolbar)
+        self.assertIn("goal", toolbar)
+        self.assertIn("1/2 tasks", toolbar)
 
-        self.assertIn("◆ You", ui.output_field.text)
-        self.assertIn("◇ Agent", ui.output_field.text)
-        self.assertIn("● Tool · read", ui.output_field.text)
-        self.assertIn("✓ read · success", ui.output_field.text)
-        sidebar = "".join(text for _, text in ui._sidebar_fragments())
-        self.assertIn("42%", sidebar)
-        self.assertIn("完善终端界面", sidebar)
-        self.assertIn("▶ 补充测试", sidebar)
+    def test_inline_tui_keeps_native_scrollback_and_text_selection(self) -> None:
+        ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
+
+        self.assertFalse(ui.session.app.full_screen)
+        self.assertFalse(ui.session.mouse_support)
+        self.assertTrue(ui.session.app.erase_when_done)
 
     def test_tui_approval_changes_input_mode(self) -> None:
         ui = TerminalIO(app_input=DummyInput(), app_output=DummyOutput())
         ui.set_approval("write", "path=app.py")
-        ui._before_render(ui.application)
 
-        self.assertEqual(ui._input_title(), " Decision ")
         prompt = "".join(text for _, text in ui._input_prompt())
-        approval = "".join(text for _, text in ui._approval_fragments())
         self.assertEqual(prompt, "approve › ")
-        self.assertIn("write", approval)
-        self.assertIn("1 Allow once", approval)
+        self.assertIn("Approval · write", ui.transcript_text)
+        self.assertIn("1 Allow once", ui.transcript_text)
 
     def test_tui_application_submits_input_and_exits(self) -> None:
         with create_pipe_input() as pipe_input:
@@ -136,6 +138,25 @@ class CliTest(unittest.TestCase):
             ui.run(submit)
 
         self.assertEqual(submitted, ["/quit"])
+
+    def test_inline_prompt_accepts_input_while_previous_work_is_running(self) -> None:
+        with create_pipe_input() as pipe_input:
+            ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())
+            submitted: list[str] = []
+
+            async def submit(text: str) -> None:
+                submitted.append(text)
+                if text == "first task":
+                    ui.set_busy(True, "Thinking")
+                    await asyncio.sleep(0.05)
+                    ui.set_busy(False, "Ready")
+                    return
+                ui.stop()
+
+            pipe_input.send_text("first task\nsteer now\n")
+            ui.run(submit)
+
+        self.assertEqual(submitted, ["first task", "steer now"])
 
     def test_busy_tui_input_is_routed_to_runtime_steering(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

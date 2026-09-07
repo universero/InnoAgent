@@ -1,34 +1,28 @@
-"""Full-screen terminal UI built with prompt_toolkit."""
+"""Codex-style inline terminal UI built with prompt_toolkit."""
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import threading
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from pathlib import Path
 from queue import Empty, SimpleQueue
 from typing import Any
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.buffer import Buffer
+from prompt_toolkit import PromptSession, print_formatted_text
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.document import Document
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import AnyFormattedText, StyleAndTextTuples
+from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText, StyleAndTextTuples
 from prompt_toolkit.input.base import Input
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.output.base import Output
-from prompt_toolkit.widgets import Frame, TextArea
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.shortcuts import CompleteStyle
 
-from view.tui_render import (
-    approval_fragments,
-    header_fragments,
-    present_event,
-    sidebar_fragments,
-    status_fragments,
-)
-from view.tui_theme import TUI_STYLE, TranscriptLexer
+from view.tui_render import present_event
+from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
 
 COMMANDS = [
@@ -43,143 +37,155 @@ MAX_TRANSCRIPT_CHARS = 120_000
 
 SubmitHandler = Callable[[str], Awaitable[None] | None]
 StateProvider = Callable[[], dict[str, Any]]
+PrintOperation = tuple[StyleAndTextTuples, str]
 
 
 class TerminalIO:
-    """A compact full-screen TUI with transcript, context rail and fixed input."""
+    """Keep terminal scrollback while presenting one persistent input prompt."""
 
     def __init__(
         self,
-        footer: Callable[[], str] | None = None,
         state_provider: StateProvider | None = None,
         app_input: Input | None = None,
         app_output: Output | None = None,
     ) -> None:
-        self.footer = footer or (lambda: "")
         self.state_provider = state_provider or (lambda: {})
+        self._app_output = app_output
         self._submit_handler: SubmitHandler | None = None
         self._updates: SimpleQueue[tuple[str, Any]] = SimpleQueue()
+        self._print_lock = threading.RLock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._flush_task: asyncio.Task[None] | None = None
+        self._dispatch_tasks: set[asyncio.Task[Any]] = set()
+        self._running = False
         self._busy = False
         self._activity = "Ready"
         self._approval: dict[str, str] | None = None
         self._stream_kind: str | None = None
         self._transcript_text = ""
-        self._transcript_dirty = False
         self._model = "custom"
         self._effort = ""
         self._cwd = "."
         self._mode = "ask"
 
-        self.output_field = TextArea(
-            text="",
-            lexer=TranscriptLexer(),
-            scrollbar=True,
-            focusable=True,
-            focus_on_click=True,
-            wrap_lines=True,
-            read_only=True,
-            style="class:transcript",
-        )
-        self.input_field = TextArea(
-            height=1,
-            multiline=False,
-            prompt=self._input_prompt,
+        self.session: PromptSession[str] = PromptSession(
+            message=self._input_prompt,
+            bottom_toolbar=self._bottom_toolbar,
+            placeholder=self._placeholder,
             completer=WordCompleter(COMMANDS, sentence=True),
             complete_while_typing=True,
-            accept_handler=self._accept_input,
-            style="class:input",
-        )
-        self.header = Window(
-            content=FormattedTextControl(self._header_fragments),
-            height=1,
-            style="class:header",
-        )
-        self.sidebar = Window(
-            content=FormattedTextControl(self._sidebar_fragments),
-            width=Dimension(min=24, preferred=30, max=34),
-            wrap_lines=True,
-            style="class:sidebar",
-        )
-        self.approval_bar = ConditionalContainer(
-            Window(
-                content=FormattedTextControl(self._approval_fragments),
-                height=3,
-                wrap_lines=True,
-                style="class:approval",
-            ),
-            filter=Condition(lambda: self._approval is not None),
-        )
-        self.status = Window(
-            content=FormattedTextControl(self._status_fragments),
-            height=1,
-            style="class:status",
-        )
-
-        sidebar_panel = ConditionalContainer(
-            Frame(
-                self.sidebar,
-                title=" Context ",
-                style="class:frame.border",
-                height=Dimension(weight=1),
-            ),
-            filter=Condition(self._sidebar_visible),
-        )
-        body = VSplit(
-            [
-                Frame(
-                    self.output_field,
-                    title=" Conversation ",
-                    style="class:frame.border",
-                    height=Dimension(weight=1),
-                ),
-                sidebar_panel,
-            ],
-            padding=1,
-            padding_char=" ",
-        )
-        root = HSplit(
-            [
-                self.header,
-                body,
-                self.approval_bar,
-                Frame(self.input_field, title=self._input_title, style="class:frame.border"),
-                self.status,
-            ],
-            style="class:root",
-        )
-        self.application: Application[None] = Application(
-            layout=Layout(root, focused_element=self.input_field),
+            complete_style=CompleteStyle.COLUMN,
+            reserve_space_for_menu=4,
+            enable_history_search=True,
             key_bindings=self._key_bindings(),
             style=TUI_STYLE,
-            full_screen=True,
-            mouse_support=True,
-            enable_page_navigation_bindings=True,
-            refresh_interval=0.1,
-            before_render=self._before_render,
+            multiline=False,
+            wrap_lines=True,
+            mouse_support=False,
+            erase_when_done=True,
+            show_frame=True,
             input=app_input,
             output=app_output,
         )
 
+    @property
+    def transcript_text(self) -> str:
+        """Expose bounded rendered text for tests and debug bundles."""
+        return self._transcript_text
+
     def run(self, submit_handler: SubmitHandler) -> None:
-        """Run one persistent application for the lifetime of the CLI."""
+        """Run an inline prompt without switching to the alternate screen."""
         self._submit_handler = submit_handler
-        self.application.run()
+        asyncio.run(self._run_async())
+
+    async def _run_async(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
+        self._running = True
+        self._flush_direct()
+
+        try:
+            with patch_stdout(raw=True):
+                while self._running:
+                    prompt_task = asyncio.create_task(self.session.prompt_async())
+                    stop_task = asyncio.create_task(self._stop_event.wait())
+                    done, _ = await asyncio.wait(
+                        {prompt_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if stop_task in done:
+                        prompt_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await prompt_task
+                        break
+
+                    stop_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await stop_task
+                    try:
+                        text = prompt_task.result().strip()
+                    except EOFError:
+                        break
+                    except KeyboardInterrupt:
+                        if self._busy:
+                            self._submit("/stop")
+                        continue
+                    if text:
+                        self._submit(text)
+                        # 让 dispatch 先更新 busy/approval，
+                        # 下一次 prompt 会立即切换语义。
+                        await asyncio.sleep(0)
+        finally:
+            self._running = False
+            if self._flush_task and not self._flush_task.done():
+                await self._flush_task
+            if self._dispatch_tasks:
+                await asyncio.gather(*tuple(self._dispatch_tasks), return_exceptions=True)
+            self._flush_direct()
+            self._loop = None
+            self._stop_event = None
+
+    def _submit(self, text: str) -> None:
+        if self._submit_handler is None:
+            return
+        try:
+            result = self._submit_handler(text)
+        except Exception as exc:  # noqa: BLE001
+            self.output(f"[error] {exc}")
+            return
+        if not inspect.isawaitable(result):
+            return
+        task = asyncio.create_task(result)
+        self._dispatch_tasks.add(task)
+        task.add_done_callback(self._dispatch_finished)
+
+    def _dispatch_finished(self, task: asyncio.Task[Any]) -> None:
+        self._dispatch_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.output(f"[error] {error}")
 
     def stop(self) -> None:
-        if self.application.is_running:
-            self.application.exit()
+        """Stop the current prompt from the event loop or a worker thread."""
+        self._running = False
+        if self._loop and self._stop_event:
+            self._loop.call_soon_threadsafe(self._stop_event.set)
 
     def banner(self, model: str, effort: str, cwd: str, mode: str) -> None:
         self._model = model
         self._effort = effort
         self._cwd = cwd
         self._mode = mode
+        subtitle = " · ".join(filter(None, [model, effort, self._display_path(cwd), mode]))
         self._queue(
             "block",
             (
                 "agent",
                 "InnoAgent",
-                "LangGraph coding agent ready. Type a task or /help.",
+                f"{subtitle}\nType a task or /help. Terminal scrollback remains selectable.",
             ),
         )
 
@@ -206,209 +212,254 @@ class TerminalIO:
         )
 
     def refresh(self) -> None:
-        self.application.invalidate()
+        if not self._loop:
+            self._flush_direct()
+            return
+        self._loop.call_soon_threadsafe(self.session.app.invalidate)
 
     def clear(self) -> None:
         self._queue("clear", None)
 
     def _queue(self, action: str, payload: Any) -> None:
-        # Runtime 可能位于后台线程；所有控件更新统一回到 TUI render cycle。
+        # Runtime 可能位于工作线程；输出统一切回 prompt_toolkit 的事件循环。
         self._updates.put((action, payload))
-        self.application.invalidate()
+        if self._loop and self._running:
+            self._loop.call_soon_threadsafe(self._schedule_flush)
+        else:
+            self._flush_direct()
 
-    def _before_render(self, _: Application[Any]) -> None:
+    def _schedule_flush(self) -> None:
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_async())
+
+    async def _flush_async(self) -> None:
+        # 合并同一模型 chunk 附近的事件，减少 prompt 重绘和输出闪烁。
+        try:
+            await asyncio.sleep(0.01)
+            operations = self._drain_updates()
+            if operations:
+                await run_in_terminal(lambda: self._render_operations(operations))
+            self.session.app.invalidate()
+        finally:
+            self._flush_task = None
+            # 事件可能在 run_in_terminal() 期间到达；
+            # 必须再次调度，避免尾部输出滞留。
+            if self._running and not self._updates.empty():
+                self._schedule_flush()
+
+    def _flush_direct(self) -> None:
+        operations = self._drain_updates()
+        if operations:
+            self._render_operations(operations)
+
+    def _drain_updates(self) -> list[PrintOperation]:
+        operations: list[PrintOperation] = []
         while True:
             try:
                 action, payload = self._updates.get_nowait()
             except Empty:
                 break
             if action == "block":
-                self._append_block(*payload)
+                operations.extend(self._append_block(*payload))
             elif action == "output":
-                self._append_output(str(payload))
+                operations.extend(self._append_output(str(payload)))
             elif action == "stream":
-                self._append_stream(*payload)
+                operations.extend(self._append_stream(*payload))
             elif action == "event":
-                self._apply_event(*payload)
+                operations.extend(self._apply_event(*payload))
             elif action == "busy":
                 self._busy, self._activity = payload
             elif action == "approval":
-                self._approval = payload
-                if payload is not None:
-                    self._activity = "Approval required"
+                operations.extend(self._apply_approval(payload))
             elif action == "clear":
                 self._transcript_text = ""
-                self._transcript_dirty = True
                 self._stream_kind = None
-        if self._transcript_dirty:
-            self.output_field.buffer.set_document(
-                Document(
-                    self._transcript_text,
-                    cursor_position=len(self._transcript_text),
-                ),
-                bypass_readonly=True,
-            )
-            self._transcript_dirty = False
+                operations.append(([('', "\x1b[2J\x1b[H")], ""))
+        return operations
 
-    def _accept_input(self, buffer: Buffer) -> bool:
-        text = buffer.text.strip()
-        buffer.set_document(Document(""), bypass_readonly=True)
-        if not text or self._submit_handler is None:
-            return True
-        result = self._submit_handler(text)
-        if inspect.isawaitable(result):
-            self.application.create_background_task(result)
-        return True
-
-    def _key_bindings(self) -> KeyBindings:
-        bindings = KeyBindings()
-
-        @bindings.add("c-c")
-        def _cancel(_event) -> None:
-            if self._busy and self._submit_handler is not None:
-                result = self._submit_handler("/stop")
-                if inspect.isawaitable(result):
-                    self.application.create_background_task(result)
-            else:
-                self.input_field.buffer.set_document(Document(""), bypass_readonly=True)
-
-        @bindings.add("c-l")
-        def _clear(_event) -> None:
-            self.clear()
-
-        @bindings.add("c-q")
-        @bindings.add("c-d")
-        def _quit(event) -> None:
-            if self.input_field.text:
-                self.input_field.buffer.delete_before_cursor(len(self.input_field.text))
-                return
-            if self._submit_handler is not None:
-                result = self._submit_handler("/quit")
-                if inspect.isawaitable(result):
-                    self.application.create_background_task(result)
-            else:
-                event.app.exit()
-
-        @bindings.add("f1")
-        def _help(_event) -> None:
-            if self._submit_handler is not None:
-                result = self._submit_handler("/help")
-                if inspect.isawaitable(result):
-                    self.application.create_background_task(result)
-
-        @bindings.add("escape")
-        def _focus_input(event) -> None:
-            event.app.layout.focus(self.input_field)
-
-        return bindings
-
-    def _append_output(self, value: str) -> None:
+    def _append_output(self, value: str) -> list[PrintOperation]:
         text = value.strip()
         if not text:
-            return
+            return []
         if text.startswith("[error]") or text.lower().startswith("error"):
-            self._append_block("error", "Error", text.removeprefix("[error]").strip())
-        elif text.startswith("InnoAgent commands"):
-            self._append_block("plan", "Commands", text.split("\n", 1)[-1].strip())
-        else:
-            self._append_block("muted", "Info", text)
+            return self._append_block("error", "Error", text.removeprefix("[error]").strip())
+        if text.startswith("InnoAgent commands"):
+            return self._append_block("plan", "Commands", text.split("\n", 1)[-1].strip())
+        return self._append_block("muted", "Info", text)
 
-    def _append_stream(self, channel: str, value: str) -> None:
+    def _append_stream(self, channel: str, value: str) -> list[PrintOperation]:
         if not value:
-            return
+            return []
+        operations: list[PrintOperation] = []
         kind = {
             "reasoning": "thinking",
             "plan": "plan",
             "reflect": "plan",
         }.get(channel, "agent")
         if self._stream_kind != kind:
-            self._close_stream()
+            operations.extend(self._close_stream())
             marker, title = {
-                "thinking": ("◌", "Thinking"),
+                "thinking": ("·", "Thinking"),
                 "plan": ("▦", "Planning" if channel == "plan" else "Reflection"),
-            }.get(kind, ("◇", "Agent"))
-            self._insert_text(f"{marker} {title}\n  ")
+            }.get(kind, ("•", "Agent"))
+            operations.append(([(f"class:output.{kind}", f"{marker} {title}\n  ")], ""))
             self._stream_kind = kind
-        self._insert_text(value)
+        operations.append(([(f"class:output.{kind}", value)], ""))
+        return operations
 
-    def _close_stream(self) -> None:
-        if self._stream_kind is not None:
-            self._insert_text("\n\n")
-            self._stream_kind = None
+    def _close_stream(self) -> list[PrintOperation]:
+        if self._stream_kind is None:
+            return []
+        self._stream_kind = None
+        return [([("", "")], "\n\n")]
 
-    def _append_block(self, tone: str, title: str, body: str = "") -> None:
-        self._close_stream()
+    def _append_block(self, tone: str, title: str, body: str = "") -> list[PrintOperation]:
+        operations = self._close_stream()
         marker = {
-            "user": "◆",
-            "agent": "◇",
-            "thinking": "◌",
-            "tool": "●",
+            "user": "›",
+            "agent": "•",
+            "thinking": "·",
+            "tool": "↳",
             "success": "✓",
             "warning": "!",
             "error": "×",
             "plan": "▦",
             "muted": "·",
         }.get(tone, "·")
-        lines = [f"{marker} {title}"]
+        fragments: StyleAndTextTuples = [
+            (f"class:output.{tone}", f"{marker} {title}"),
+        ]
         if body:
-            lines.extend(f"  {line}" for line in body.splitlines())
-        self._insert_text("\n".join(lines) + "\n\n")
+            fragments.append(("", "\n"))
+            for index, line in enumerate(body.splitlines()):
+                if index:
+                    fragments.append(("", "\n"))
+                fragments.append(("class:output.body", f"  {line}"))
+        operations.append((fragments, "\n\n"))
+        return operations
 
-    def _insert_text(self, value: str) -> None:
-        self._transcript_text += value
-        if len(self._transcript_text) > MAX_TRANSCRIPT_CHARS:
-            trimmed = self._transcript_text[-MAX_TRANSCRIPT_CHARS:]
-            first_break = trimmed.find("\n")
-            if first_break >= 0:
-                trimmed = trimmed[first_break + 1 :]
-            self._transcript_text = trimmed
-        self._transcript_dirty = True
-
-    def _apply_event(self, event: dict[str, Any], rendered: str) -> None:
+    def _apply_event(self, event: dict[str, Any], rendered: str) -> list[PrintOperation]:
         presentation = present_event(event, rendered)
+        operations: list[PrintOperation] = []
         if presentation.activity:
             self._activity = presentation.activity
         if presentation.stream:
-            self._append_stream(*presentation.stream)
+            operations.extend(self._append_stream(*presentation.stream))
         if presentation.block:
-            self._append_block(*presentation.block)
+            operations.extend(self._append_block(*presentation.block))
+        if event.get("type") in {"turn.completed", "turn.failed", "response.failed"}:
+            operations.extend(self._close_stream())
+        return operations
+
+    def _apply_approval(self, approval: dict[str, str] | None) -> list[PrintOperation]:
+        if approval is None:
+            self._approval = None
+            return []
+        if approval == self._approval:
+            return []
+        self._approval = approval
+        self._activity = "Approval required"
+        detail = approval.get("detail") or "This operation needs permission."
+        return self._append_block(
+            "warning",
+            f"Approval · {approval.get('tool', 'tool')}",
+            f"{detail}\n1 Allow once   2 Always here   3 Deny",
+        )
+
+    def _render_operations(self, operations: list[PrintOperation]) -> None:
+        with self._print_lock:
+            for fragments, end in operations:
+                plain = "".join(text for _, text in fragments) + end
+                self._record(plain)
+                print_formatted_text(
+                    FormattedText(fragments),
+                    style=OUTPUT_STYLE,
+                    end=end,
+                    output=self._app_output,
+                )
+
+    def _record(self, value: str) -> None:
+        self._transcript_text += value
+        if len(self._transcript_text) <= MAX_TRANSCRIPT_CHARS:
+            return
+        trimmed = self._transcript_text[-MAX_TRANSCRIPT_CHARS:]
+        first_break = trimmed.find("\n")
+        self._transcript_text = trimmed[first_break + 1 :] if first_break >= 0 else trimmed
 
     def _input_prompt(self) -> AnyFormattedText:
         if self._approval is not None:
-            label = "approve › "
-        elif self._busy:
-            label = "steer › "
-        else:
-            label = "message › "
-        return [("class:input.prompt", label)]
-
-    def _input_title(self) -> AnyFormattedText:
-        if self._approval is not None:
-            return " Decision "
+            return [("class:prompt.approval", "approve › ")]
         if self._busy:
-            return " Steer current turn "
-        return " Message "
+            return [("class:prompt.busy", "steer › ")]
+        return [("class:prompt", "› ")]
 
-    def _header_fragments(self) -> StyleAndTextTuples:
-        return header_fragments(self._cwd, self._activity, self._busy)
+    def _placeholder(self) -> AnyFormattedText:
+        if self._approval is not None:
+            return [("class:placeholder", "Choose 1, 2, or 3")]
+        if self._busy:
+            return [("class:placeholder", "Correct the current turn or type /stop")]
+        return [("class:placeholder", "Ask InnoAgent to do anything")]
 
-    def _sidebar_fragments(self) -> StyleAndTextTuples:
-        return sidebar_fragments(self._safe_snapshot(), self._model, self._mode)
-
-    def _approval_fragments(self) -> StyleAndTextTuples:
-        return approval_fragments(self._approval)
-
-    def _status_fragments(self) -> StyleAndTextTuples:
-        return status_fragments()
+    def _bottom_toolbar(self) -> AnyFormattedText:
+        snapshot = self._safe_snapshot()
+        state = snapshot.get("state") or {}
+        context = state.get("context_usage") or {}
+        usage = state.get("usage") or {}
+        model = str(snapshot.get("model") or self._model)
+        mode = str(snapshot.get("mode") or self._mode)
+        percent = float(context.get("percent_used", 0))
+        tokens = int(usage.get("total_tokens", 0))
+        goal = state.get("goal") or snapshot.get("goal")
+        tasks = state.get("tasks") or []
+        completed_tasks = sum(1 for task in tasks if task.get("status") == "done")
+        progress = ""
+        if goal:
+            progress += "  ·  goal"
+        if tasks:
+            progress += f"  ·  {completed_tasks}/{len(tasks)} tasks"
+        activity_style = "class:toolbar.busy" if self._busy else "class:toolbar.ready"
+        return [
+            ("class:toolbar.model", f" {model}"),
+            ("class:toolbar", f" {self._effort}" if self._effort else ""),
+            ("class:toolbar", "  ·  "),
+            ("class:toolbar.path", self._display_path(self._cwd)),
+            (
+                "class:toolbar",
+                f"  ·  {mode}  ·  {tokens:,} tokens  ·  {percent:.0f}% ctx{progress}  ·  ",
+            ),
+            (activity_style, self._activity),
+            ("class:toolbar", " "),
+        ]
 
     def _safe_snapshot(self) -> dict[str, Any]:
         try:
             return self.state_provider() or {}
-        except Exception:
+        except Exception:  # noqa: BLE001
             return {}
 
-    def _sidebar_visible(self) -> bool:
+    def _key_bindings(self) -> KeyBindings:
+        bindings = KeyBindings()
+
+        @bindings.add("c-l")
+        def _clear(event) -> None:
+            event.app.renderer.clear()
+
+        @bindings.add("f1")
+        def _help(event) -> None:
+            event.app.exit(result="/help")
+
+        @bindings.add("c-q")
+        def _quit(event) -> None:
+            event.app.exit(result="/quit")
+
+        return bindings
+
+    @staticmethod
+    def _display_path(value: str) -> str:
+        path = Path(value).expanduser()
+        home = Path.home()
         try:
-            return self.application.output.get_size().columns >= 72
-        except AttributeError:
-            return True
+            relative = path.relative_to(home)
+        except ValueError:
+            return str(path)
+        return "~" if not relative.parts else f"~/{relative}"

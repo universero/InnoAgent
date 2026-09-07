@@ -108,7 +108,7 @@ domain modules -X-> view
 
 ## 退出与资源管理
 
-当前 HTTP 客户端在每次请求的 context manager 中关闭，TUI Application 由 CLI 管理。Memory daemon thread 不等待退出，Session 使用短生命周期文件句柄。
+当前 HTTP 客户端在每次请求的 context manager 中关闭，TUI `PromptSession` 与后台 dispatch task 由 CLI 管理。Memory daemon thread 不等待退出，Session 使用短生命周期文件句柄。
 
 未来若引入连接池、持久数据库或远程 worker，应给 Runtime 增加显式 `close()`/context manager，并由入口统一释放资源。
 
