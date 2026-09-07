@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
@@ -20,7 +20,7 @@ from test.fakes import FakeModel
 from view.cli import InnoAgentCLI
 from view.commands import command_info, parse_command
 from view.render import render_event, render_events, render_sessions, render_state, render_tools
-from view.terminal import TerminalIO
+from view.terminal import CUSTOM_INPUT_OPTION, SelectionCompleter, SelectionState, TerminalIO
 from view.tui_theme import OUTPUT_STYLE, TUI_STYLE
 
 
@@ -217,6 +217,80 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(submitted, ["/quit"])
 
+    def test_inline_selector_uses_arrows_and_enter(self) -> None:
+        with create_pipe_input() as pipe_input:
+            ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())
+            selected: list[str | None] = []
+
+            async def submit(text: str) -> None:
+                if text == "select":
+                    selected.append(
+                        await ui.select("model", ["alpha", "beta", "gamma"], current="beta")
+                    )
+                    ui.stop()
+
+            pipe_input.send_text("select\n")
+            pipe_input.send_bytes(b"\x1b[B\r")
+            ui.run(submit)
+
+        self.assertEqual(selected, ["gamma"])
+
+    def test_inline_selector_custom_choice_accepts_text(self) -> None:
+        with create_pipe_input() as pipe_input:
+            ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())
+            selected: list[str | None] = []
+
+            async def submit(text: str) -> None:
+                if text == "question":
+                    selected.append(
+                        await ui.select("answer", ["yes", "no"], allow_custom=True)
+                    )
+                    ui.stop()
+
+            pipe_input.send_text("question\n")
+            pipe_input.send_bytes(b"\x1b[B\x1b[B\rcustom answer\r")
+            ui.run(submit)
+
+        self.assertEqual(selected, ["custom answer"])
+
+    def test_ctrl_c_during_selection_still_quits_gracefully(self) -> None:
+        with create_pipe_input() as pipe_input:
+            ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())
+            submitted: list[str] = []
+            selected: list[str | None] = []
+
+            async def submit(text: str) -> None:
+                submitted.append(text)
+                if text == "select":
+                    selected.append(await ui.select("model", ["alpha", "beta"]))
+                elif text == "/quit":
+                    ui.stop()
+
+            pipe_input.send_text("select\n")
+            pipe_input.send_bytes(b"\x03")
+            ui.run(submit)
+
+        self.assertEqual(selected, [None])
+        self.assertEqual(submitted, ["select", "/quit"])
+
+    def test_selector_marks_current_value_and_adds_custom_option(self) -> None:
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+        state = SelectionState(
+            title="model",
+            options=["alpha", "beta"],
+            current="beta",
+            allow_custom=True,
+            future=loop.create_future(),
+            selected_index=1,
+        )
+        completions = list(
+            SelectionCompleter(state).get_completions(Document(""), CompleteEvent())
+        )
+
+        self.assertEqual([item.text for item in completions], ["beta", "alpha", CUSTOM_INPUT_OPTION])
+        self.assertIn("current", completions[0].display_text)
+
     def test_ctrl_c_is_converted_to_graceful_quit(self) -> None:
         with create_pipe_input() as pipe_input:
             ui = TerminalIO(app_input=pipe_input, app_output=DummyOutput())
@@ -303,6 +377,34 @@ class CliTest(unittest.TestCase):
                 session_id=None,
                 delivery="after_tool",
             )
+
+    def test_model_command_fetches_provider_models_and_uses_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from core.llm import OpenAICompatibleModel
+
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    memory_enabled=False,
+                ),
+                model=OpenAICompatibleModel("key", "https://example.com/v1", "alpha"),
+            )
+            cli = InnoAgentCLI(runtime, input_fn=lambda prompt="": "", output_fn=lambda _: None)
+            cli.terminal = MagicMock()
+            cli.terminal.select = AsyncMock(return_value="beta")
+
+            with patch.object(runtime, "list_models", return_value=["alpha", "beta"]):
+                asyncio.run(cli._dispatch_tui_input("/model"))
+
+            self.assertEqual(runtime.model.model, "beta")
+            cli.terminal.select.assert_awaited_once_with(
+                "Select model",
+                ["alpha", "beta"],
+                current="alpha",
+            )
+            cli.terminal.set_model.assert_called_once_with("beta", "none")
 
     def test_render_state(self) -> None:
         """Verify final state rendering omits internal status text."""

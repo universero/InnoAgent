@@ -33,7 +33,7 @@ COMMAND_SPECS = (
     CommandSpec("compact", "/compact [focus]", "compact the current session context"),
     CommandSpec("permissions", "/permissions", "show repository permission rules"),
     CommandSpec("mode", "/mode ask|auto|readonly", "choose approval behavior"),
-    CommandSpec("model", "/model <name> [effort]", "change model and reasoning effort"),
+    CommandSpec("model", "/model", "select a model from the configured provider"),
     CommandSpec("tools", "/tools", "list registered tools"),
     CommandSpec("skills", "/skills", "list discovered Skills"),
     CommandSpec("skill", "/skill <name>", "activate a Skill"),

@@ -68,6 +68,46 @@ class OpenAICompatibleModel(BaseModelClient):
         self.model = model or "deepseek-v4-flash"
         self.reasoning_effort = reasoning_effort or "none"
 
+    def list_models(self, timeout: float = 15.0) -> list[str]:
+        """从 OpenAI 兼容的 models 端点读取可用模型。"""
+        response = httpx.get(
+            f"{self.base_url}/models",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw_models: Any
+        if isinstance(payload, dict):
+            if "data" in payload:
+                raw_models = payload["data"]
+            elif "models" in payload:
+                raw_models = payload["models"]
+            else:
+                raise ValueError("模型服务返回了无法识别的模型列表")
+        else:
+            raw_models = payload
+        if not isinstance(raw_models, list):
+            raise ValueError("模型服务返回了无法识别的模型列表")
+
+        names: set[str] = set()
+        for item in raw_models:
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(
+                    item.get("id") or item.get("model") or item.get("name") or ""
+                ).strip()
+            else:
+                name = ""
+            if name:
+                names.add(name)
+        if self.model:
+            names.add(self.model)
+        if not names:
+            raise ValueError("模型服务没有返回可用模型")
+        return sorted(names, key=str.casefold)
+
     def respond(
         self,
         context: str,

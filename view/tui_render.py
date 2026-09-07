@@ -73,6 +73,17 @@ def present_event(event: dict[str, Any], rendered: str = "") -> EventPresentatio
                 detail,
             ),
         )
+    if event_type == "item.completed" and item_type == "user_question":
+        question = str(
+            payload.get("question")
+            or payload.get("content")
+            or event.get("content")
+            or ""
+        )
+        return EventPresentation(
+            activity="Waiting for answer",
+            block=("warning", "Question", question),
+        )
     if event_type == "approval.requested":
         # 具体参数和选项由 TerminalIO.set_approval() 一次性展示，
         # 避免重复卡片。

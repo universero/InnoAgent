@@ -95,8 +95,9 @@ TUI 输入由 `_dispatch_tui_input()` 按状态路由：
 
 1. Runtime busy：普通文本和 `/steer` 进入 steering；`/stop` 请求安全停止。
 2. Pending approval：输入解析为 allow once、always 或 deny。
-3. 空闲 Slash 命令：进入控制命令处理。
-4. 空闲普通文本：启动新 turn。
+3. Pending user question：进入选项选择器，回答作为同一 Session 的下一条 user message。
+4. 空闲 Slash 命令：进入控制命令处理。
+5. 空闲普通文本：启动新 turn。
 
 运行中不允许执行任意 Slash 配置命令，因为它们可能与正在使用的模型、Session 或状态竞争。只有 steering 和 stop 属于 live input。
 
@@ -114,13 +115,15 @@ TUI 输入由 `_dispatch_tui_input()` 按状态路由：
 | `/approve` | 非 TUI 场景解决 pending approval |
 | `/steer`、`/stop` | 运行中纠偏与停止 |
 | `/mode` | 切换 ask、auto、readonly |
-| `/model` | 更新模型和 reasoning effort |
+| `/model` | 从当前 Provider 的模型列表中选择模型 |
 | `/resume`、`/sessions`、`/rename` | Session 管理 |
 | `/new`、`/clear`、`/quit` | 生命周期与界面控制 |
 
 Slash 命令是控制输入，不追加为普通用户消息。否则模型会把“切换模式”误解为业务任务，Session 重放也无法区分控制行为。
 
 命令名称、usage 和说明集中维护在 `view/commands.py`。TUI 补全器仅处理以 `/` 开头且尚未输入参数的内容：输入 `/` 展示全部命令，继续输入时按命令名前缀过滤，并在候选项右侧展示说明。`/help` 从同一份注册表生成，避免命令解析、帮助和补全信息漂移。
+
+`TerminalIO.select()` 是模型选择和用户问题共用的选择状态机。候选项由同一个 `PromptSession` 的 completion menu 展示，选中索引由终端层同步维护，因此快速按键不依赖异步补全是否已经结束。普通选项用 `↑`、`↓` 和 `Enter` 操作；问题可追加“自行输入…”，切换后继续复用底部输入框。`Esc` 在自定义输入阶段返回选项，在选项阶段取消；`Ctrl-C` 仍沿用全局优雅退出语义。
 
 `Ctrl-C` 在 TUI 键位层同时接管字符输入和 `SIGINT`，统一转换为 `/quit`。空闲时直接结束输入循环；执行中复用 `/quit` 的安全停止路径，先向 Runtime 提交停止请求，等待当前工具边界完成后退出。`TerminalIO.run()` 仍捕获极端时序下的 `KeyboardInterrupt`，并在退出前回收 prompt 子任务，避免 traceback 和未读取任务异常。
 
@@ -133,7 +136,9 @@ flowchart TB
     Events[AgentEvent] --> Scrollback[原生终端 scrollback]
     Input[PromptSession 输入框] --> Dispatch[异步输入分发]
     Snapshot[稳定状态快照] --> Toolbar[底部状态栏]
-    Approval[审批状态] --> InputMode[approve / steer / normal]
+    Approval[审批状态] --> InputMode[approve / steer / select / normal]
+    Question[pending_user_question] --> Selector[共用选择器]
+    Selector --> Input
 ```
 
 `TerminalIO` 使用一个长生命周期 `PromptSession`，但每次提交后立即开始下一次 `prompt_async()`。它不使用 `full_screen=True`，不进入 alternate screen，也不维护可聚焦的只读 transcript 控件。

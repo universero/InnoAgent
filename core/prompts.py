@@ -29,6 +29,8 @@ Execution rules:
 - Load a Skill only when its description matches the task or the user selected it. Delegate only a
   focused, self-contained, read-only investigation that benefits from context isolation.
 - Ask the user only when required information, authorization, or an external state change is missing.
+- When a user choice is required, call ask_user with a concise question and 2-5 mutually exclusive
+  options. Do not simulate an interactive menu in ordinary response text.
 """
 
 PLANNING_PROMPT = """You are the Planning stage of a coding agent. Create or revise a short,
@@ -48,7 +50,7 @@ REFLECTION_PROMPT = """You are the Reflection stage of a coding agent. Decide wh
 goal is actually complete using the supplied plan, tasks, tool results, errors, and proposed final
 response. Return JSON only with this exact shape:
 {"complete":false,"confidence":0.0,"summary":"","feedback":"","needs_user":false,
-"blocked":false,"missing_conditions":[],"evidence":[]}
+"question":"","options":[],"blocked":false,"missing_conditions":[],"evidence":[]}
 
 Rules:
 - Be conservative. Model claims and task labels are not proof; prefer concrete tool results, tests,
@@ -58,6 +60,8 @@ Rules:
 - If the main agent can close a gap, set complete=false and provide specific next-action feedback.
 - Set needs_user only when user information or approval is required. Set blocked only when the
   environment cannot progress. These flags must be false when complete is true.
+- When needs_user=true, put the exact user-facing question in question and provide 2-5 concise,
+  mutually exclusive options when known. Leave options empty for genuinely free-form answers.
 - Do not execute tools, expose hidden reasoning, or include markdown fences.
 """
 

@@ -12,6 +12,8 @@ class ReflectionResult(BaseModel):
     summary: str = ""
     feedback: str = ""
     needs_user: bool = False
+    question: str = ""
+    options: list[str] = Field(default_factory=list)
     blocked: bool = False
     missing_conditions: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)

@@ -53,6 +53,7 @@ class AgentState(TypedDict, total=False):
     max_iterations: int
     errors: list[dict[str, Any]]
     pending_confirmation: dict[str, Any] | None
+    pending_user_question: dict[str, Any] | None
 
 
 def initial_state(
@@ -103,4 +104,5 @@ def initial_state(
         max_iterations=max_iterations,
         errors=[],
         pending_confirmation=None,
+        pending_user_question=None,
     )

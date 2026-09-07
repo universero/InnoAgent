@@ -7,6 +7,7 @@ import inspect
 import threading
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from typing import Any
@@ -37,6 +38,65 @@ MAX_TRANSCRIPT_CHARS = 120_000
 SubmitHandler = Callable[[str], Awaitable[None] | None]
 StateProvider = Callable[[], dict[str, Any]]
 PrintOperation = tuple[StyleAndTextTuples, str]
+CUSTOM_INPUT_OPTION = "自行输入…"
+
+
+class SelectionCancelled(Exception):
+    """Internal signal used when an inline selector is cancelled."""
+
+
+@dataclass
+class SelectionState:
+    """State shared by the prompt loop and one waiting selector caller."""
+
+    title: str
+    options: list[str]
+    current: str | None
+    allow_custom: bool
+    future: asyncio.Future[str | None]
+    custom_input: bool = False
+    selected_index: int = 0
+
+    def values(self) -> list[str]:
+        values = list(self.options)
+        if self.allow_custom:
+            values.append(CUSTOM_INPUT_OPTION)
+        return values
+
+
+class SelectionCompleter(Completer):
+    """Render selector rows in the same completion menu used by slash commands."""
+
+    def __init__(self, state: SelectionState) -> None:
+        self.state = state
+
+    def get_completions(
+        self,
+        document: Document,
+        complete_event: CompleteEvent,
+    ):
+        if self.state.custom_input:
+            return
+        prefix = document.text_before_cursor.casefold()
+        values = self._ordered_values()
+        for value in values:
+            if prefix and prefix not in value.casefold():
+                continue
+            current = value == self.state.current
+            yield Completion(
+                value,
+                start_position=-len(document.text_before_cursor),
+                display=f"{value}  (current)" if current else value,
+                display_meta="current model" if current else "",
+            )
+
+    def _ordered_values(self) -> list[str]:
+        options = list(self.state.options)
+        if self.state.selected_index < len(options):
+            index = self.state.selected_index
+            options = options[index:] + options[:index]
+            return options + ([CUSTOM_INPUT_OPTION] if self.state.allow_custom else [])
+        return [CUSTOM_INPUT_OPTION, *options] if self.state.allow_custom else options
 
 
 class SlashCommandCompleter(Completer):
@@ -83,6 +143,7 @@ class TerminalIO:
         self._busy = False
         self._activity = "Ready"
         self._approval: dict[str, str] | None = None
+        self._selection: SelectionState | None = None
         self._stream_kind: str | None = None
         self._stream_pending = ""
         self._transcript_text = ""
@@ -140,7 +201,22 @@ class TerminalIO:
         try:
             with patch_stdout(raw=True):
                 while self._running:
-                    prompt_task = asyncio.create_task(self.session.prompt_async())
+                    selection = self._selection
+                    prompt_task = asyncio.create_task(
+                        self.session.prompt_async(
+                            completer=(
+                                SelectionCompleter(selection)
+                                if selection is not None
+                                else SlashCommandCompleter()
+                            ),
+                            complete_while_typing=selection is None,
+                            pre_run=(
+                                lambda: self._start_selection(selection)
+                                if selection is not None
+                                else None
+                            ),
+                        )
+                    )
                     stop_task = asyncio.create_task(self._stop_event.wait())
                     done, _ = await asyncio.wait(
                         {prompt_task, stop_task},
@@ -157,13 +233,19 @@ class TerminalIO:
                         await stop_task
                     try:
                         text = prompt_task.result().strip()
+                    except SelectionCancelled:
+                        if selection is not None:
+                            self._finish_selection(selection, None)
+                        continue
                     except EOFError:
                         break
                     except KeyboardInterrupt:
                         if self._busy:
                             self._submit("/stop")
                         continue
-                    if text:
+                    if selection is not None:
+                        self._finish_selection(selection, text or None)
+                    elif text:
                         self._submit(text)
                         # 让 dispatch 先更新 busy/approval，
                         # 下一次 prompt 会立即切换语义。
@@ -212,6 +294,45 @@ class TerminalIO:
         self._running = False
         if self._loop and self._stop_event:
             self._loop.call_soon_threadsafe(self._stop_event.set)
+
+    async def select(
+        self,
+        title: str,
+        options: list[str],
+        *,
+        current: str | None = None,
+        allow_custom: bool = False,
+    ) -> str | None:
+        """Open an inline Up/Down/Enter selector and wait for its result."""
+        if self._selection is not None:
+            raise RuntimeError("another terminal selection is already active")
+        normalized = list(dict.fromkeys(item.strip() for item in options if item.strip()))
+        if not normalized and not allow_custom:
+            return None
+        future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        self._selection = SelectionState(
+            title=title,
+            options=normalized,
+            current=current if current in normalized else None,
+            allow_custom=allow_custom,
+            future=future,
+            custom_input=not normalized and allow_custom,
+            selected_index=(
+                normalized.index(current)
+                if current is not None and current in normalized
+                else 0
+            ),
+        )
+        if self.session.app.is_running:
+            # 结束当前空输入 prompt，让主循环立刻以选择模式重开同一个输入框。
+            self.session.app.exit(result="")
+        self.session.app.invalidate()
+        return await future
+
+    def set_model(self, model: str, effort: str = "") -> None:
+        self._model = model
+        self._effort = effort
+        self.refresh()
 
     def banner(self, model: str, effort: str, cwd: str, mode: str) -> None:
         self._model = model
@@ -485,6 +606,9 @@ class TerminalIO:
         self._transcript_text = trimmed[first_break + 1 :] if first_break >= 0 else trimmed
 
     def _input_prompt(self) -> AnyFormattedText:
+        if self._selection is not None:
+            label = "answer" if self._selection.custom_input else self._selection.title
+            return [("class:prompt.selection", f"{label} › ")]
         if self._approval is not None:
             return [("class:prompt.approval", "approve › ")]
         if self._busy:
@@ -492,6 +616,10 @@ class TerminalIO:
         return [("class:prompt", "› ")]
 
     def _placeholder(self) -> AnyFormattedText:
+        if self._selection is not None:
+            if self._selection.custom_input:
+                return [("class:placeholder", "Type your answer")]
+            return [("class:placeholder", "Choose an option")]
         if self._approval is not None:
             return [("class:placeholder", "Choose 1, 2, or 3")]
         if self._busy:
@@ -499,6 +627,16 @@ class TerminalIO:
         return [("class:placeholder", "Ask InnoAgent to do anything")]
 
     def _bottom_toolbar(self) -> AnyFormattedText:
+        if self._selection is not None:
+            hint = (
+                " Type your answer  ·  Enter confirm  ·  Esc back"
+                if self._selection.custom_input
+                else (
+                    " ↑↓ navigate  ·  Enter confirm  ·  Esc cancel"
+                    f"  ·  {self._selection.values()[self._selection.selected_index]}"
+                )
+            )
+            return [("class:toolbar.selection", hint)]
         snapshot = self._safe_snapshot()
         state = snapshot.get("state") or {}
         context = state.get("context_usage") or {}
@@ -551,6 +689,13 @@ class TerminalIO:
         @bindings.add("c-c", eager=True)
         @bindings.add(Keys.SIGINT, eager=True)
         def _interrupt(event) -> None:
+            if self._selection is not None:
+                selection = self._selection
+                event.current_buffer.reset()
+                self._finish_selection(selection, None)
+                event.app.exit(result="")
+                self._submit("/quit")
+                return
             # 无论空闲还是执行中都走 /quit；CLI 会在执行中先请求安全停止。
             event.current_buffer.reset()
             event.app.exit(result="/quit")
@@ -565,9 +710,95 @@ class TerminalIO:
 
         @bindings.add("c-q")
         def _quit(event) -> None:
+            if self._selection is not None:
+                selection = self._selection
+                event.current_buffer.reset()
+                self._finish_selection(selection, None)
+                event.app.exit(result="")
+                self._submit("/quit")
+                return
             event.app.exit(result="/quit")
 
+        @bindings.add("enter", eager=True)
+        def _accept_selection(event) -> None:
+            selection = self._selection
+            if selection is None:
+                event.current_buffer.validate_and_handle()
+                return
+            buffer = event.current_buffer
+            if selection.custom_input:
+                if buffer.text.strip():
+                    event.app.exit(result=buffer.text.strip())
+                return
+            values = selection.values()
+            if not values:
+                return
+            value = values[selection.selected_index]
+            if value == CUSTOM_INPUT_OPTION:
+                selection.custom_input = True
+                buffer.reset()
+                event.app.invalidate()
+                return
+            event.app.exit(result=value)
+
+        @bindings.add("up", eager=True)
+        def _previous_selection(event) -> None:
+            self._move_selection(event, -1)
+
+        @bindings.add("down", eager=True)
+        def _next_selection(event) -> None:
+            self._move_selection(event, 1)
+
+        @bindings.add("escape", eager=True)
+        def _cancel_selection(event) -> None:
+            selection = self._selection
+            if selection is None:
+                event.current_buffer.cancel_completion()
+                return
+            if selection.custom_input and selection.options:
+                selection.custom_input = False
+                event.current_buffer.reset()
+                self._start_selection(selection)
+                event.app.invalidate()
+                return
+            event.app.exit(exception=SelectionCancelled())
+
         return bindings
+
+    def _start_selection(self, selection: SelectionState) -> None:
+        if selection.custom_input:
+            return
+        buffer = self.session.app.current_buffer
+        buffer.start_completion(select_first=True)
+
+    def _move_selection(self, event: Any, offset: int) -> None:
+        selection = self._selection
+        if selection is None:
+            if offset < 0:
+                event.current_buffer.history_backward()
+            else:
+                event.current_buffer.history_forward()
+            return
+        if selection.custom_input:
+            return
+        values = selection.values()
+        if not values:
+            return
+        selection.selected_index = (selection.selected_index + offset) % len(values)
+        event.current_buffer.reset()
+        event.current_buffer.start_completion(select_first=True)
+        event.app.invalidate()
+
+    def _finish_selection(
+        self,
+        selection: SelectionState,
+        result: str | None,
+    ) -> None:
+        if self._selection is selection:
+            self._selection = None
+        if not selection.future.done():
+            selection.future.set_result(result)
+        self.session.app.invalidate()
 
     @staticmethod
     def _display_path(value: str) -> str:

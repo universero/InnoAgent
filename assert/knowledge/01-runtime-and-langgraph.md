@@ -34,7 +34,7 @@ flowchart TD
     Start([START]) --> Main[main_agent]
     Main -->|tool calls| Tools[tool_batch]
     Tools -->|completed| Main
-    Tools -->|approval required| End([END])
+    Tools -->|approval / user input required| End([END])
     Main -->|goal exists, no tool| Reflect[reflection]
     Reflect -->|actionable feedback| Main
     Reflect -->|complete / needs_user / blocked / limit| End
@@ -99,8 +99,11 @@ flowchart TD
 - 收集 `needs_confirmation` 调用。
 - 构造 `pending_confirmation` 与三个审批选项。
 - 发出 `approval.requested`，以 `approval_required` 暂停当前 turn。
+- 识别 `ask_user` 的结构化问题，写入 `pending_user_question`，以 `user_input_required` 暂停。
 
-等待审批时结束本次图运行而不是阻塞 LangGraph 节点。这样 UI 可以继续响应，pending calls 也可以进入 session checkpoint。
+等待审批或用户回答时结束本次图运行而不是阻塞 LangGraph 节点。这样 UI 可以继续响应，pending 数据也可以进入 session checkpoint。
+
+`ask_user` 是无副作用串行工具。它只返回问题、候选项和是否允许自定义输入；Runtime 负责发出 `user_question` 事件并暂停，TUI 负责收集答案。下一轮 `invoke()` 清理 pending 字段、追加答案为 user message，再从主图入口继续。工具不直接读取终端，因此 Web、IDE 或远程客户端可以复用相同协议。
 
 ## 审批恢复
 
@@ -117,7 +120,7 @@ flowchart TD
 当模型不再请求工具且 session 存在 goal 时，Runtime 调用 `StageRunner.reflect()`。结果分为：
 
 - `complete=true`：标记目标完成并结束。
-- `needs_user=true`：保留反馈，要求用户补充信息。
+- `needs_user=true`：保存结构化问题与可选候选项，要求用户补充信息。
 - `blocked=true`：报告环境或权限阻塞。
 - 仍可推进：把 feedback 写入 Reflection 状态，再回到 `main_agent`。
 - 超过 `max_reflections`：以明确限制结束，避免模型与评审器无限互相驳回。
@@ -146,7 +149,7 @@ Runtime 使用线程锁保护 `_steering_queues` 和 `_stop_requests`。纠偏�
 | 身份 | `session_id`、`turn_id`、`user_id` | 关联事件、会话和用户 |
 | 对话 | `user_input`、`messages`、`response` | 模型可见历史和当前输出 |
 | 控制 | `next_action`、`finished`、`finish_reason`、`iteration` | 图路由与终止 |
-| 执行 | `tool_calls`、`tool_results`、`pending_tool_calls` | 工具意图、证据和审批暂停 |
+| 执行 | `tool_calls`、`tool_results`、`pending_tool_calls`、`pending_user_question` | 工具意图、证据和交互暂停 |
 | 目标 | `goal`、`plan`、`tasks`、`reflection` | 长任务闭环 |
 | 上下文 | `active_skills`、`context_summary`、`context_usage`、`usage` | 能力、压缩和预算 |
 
@@ -159,6 +162,7 @@ Runtime 不允许把“模型没有继续说”作为唯一结束依据。当前
 - 正常完成：`completed`。
 - 用户停止：`stopped`。
 - 工具审批：`approval_required`，属于暂停而非目标完成。
+- 用户输入：`user_input_required`，属于可恢复暂停。
 - 模型或运行错误：`error`。
 - 主循环上限：`iteration_limit`。
 - Reflection 上限：`reflection_limit`。

@@ -105,10 +105,14 @@ class InnoAgentCLI:
             self.terminal.add_user_message(f"Approval: {decision}")
             self.terminal.set_approval()
             await self._run_tui_work(lambda: self._resolve_approval(decision), "Running approved tool")
+            await self._prompt_for_user_question()
             return
 
         if command:
             self.terminal.add_user_message(text)
+            if command.name == "model":
+                await self._select_model()
+                return
             if command.name in {"clear", "new"}:
                 self.terminal.clear()
             await self._run_tui_work(
@@ -116,6 +120,7 @@ class InnoAgentCLI:
                 "Running command",
                 accepts_steering=False,
             )
+            await self._prompt_for_user_question()
             return
 
         self.terminal.add_user_message(text)
@@ -124,6 +129,56 @@ class InnoAgentCLI:
             "Thinking",
             accepts_steering=True,
         )
+        await self._prompt_for_user_question()
+
+    async def _select_model(self) -> None:
+        """Fetch provider models, then switch using the shared inline selector."""
+        assert self.terminal is not None
+        self._tui_busy = True
+        self._tui_accepts_steering = False
+        self.terminal.set_busy(True, "Loading models")
+        try:
+            models = await asyncio.to_thread(self.runtime.list_models)
+        except Exception as exc:  # noqa: BLE001
+            self.output_fn(f"[error] 无法获取模型列表：{exc}")
+            return
+        finally:
+            self._tui_busy = False
+            self.terminal.set_busy(False, "Ready")
+
+        current = str(getattr(self.runtime.model, "model", ""))
+        selected = await self.terminal.select("Select model", models, current=current)
+        if selected is None or selected == current:
+            self.terminal.refresh()
+            return
+        try:
+            updated = await asyncio.to_thread(self.runtime.update_model, selected, None)
+        except (TypeError, ValueError) as exc:
+            self.output_fn(f"[error] {exc}")
+            return
+        self.terminal.set_model(updated.model, updated.reasoning_effort)
+        self.output_fn(f"model: {updated.model} {updated.reasoning_effort}")
+
+    async def _prompt_for_user_question(self) -> None:
+        """Resolve structured model questions and continue the same session."""
+        assert self.terminal is not None
+        while True:
+            pending = (self.current_state or {}).get("pending_user_question") or {}
+            if not pending:
+                return
+            answer = await self.terminal.select(
+                "Answer",
+                [str(item) for item in pending.get("options", [])],
+                allow_custom=bool(pending.get("allow_custom", True)),
+            )
+            if answer is None:
+                return
+            self.terminal.add_user_message(answer)
+            await self._run_tui_work(
+                lambda: self._handle_task(answer, request_approval=False),
+                "Thinking",
+                accepts_steering=True,
+            )
 
     async def _run_tui_work(
         self,

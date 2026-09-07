@@ -37,6 +37,7 @@ _GOAL_UNSET = object()
 def _register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     """Import and register all built-in tools exactly once."""
     from core.tool import (  # noqa: F401
+        ask_user_tool,
         grep_tool,
         ls_tool,
         plan_tool,
@@ -179,6 +180,7 @@ class EventDrivenAgent:
             {"role": "user", "content": user_input}
         ]
         state["pending_confirmation"] = None
+        state["pending_user_question"] = None
         state["pending_tool_calls"] = []
         state["finished"] = False
         state["finish_reason"] = None
@@ -297,14 +299,24 @@ class EventDrivenAgent:
             state["response"] = reflection.feedback or reflection.summary or state["response"]
             state["finished"] = True
             state["finish_reason"] = "needs_user" if reflection.needs_user else "blocked"
-            self._emit(
-                AgentEvent(
-                    type="item.completed",
-                    stage="reflect",
-                    item_type="user_question" if reflection.needs_user else "message",
-                    payload={"content": state["response"]},
+            if reflection.needs_user:
+                self._set_pending_user_question(
+                    state,
+                    {
+                        "question": reflection.question or state["response"],
+                        "options": reflection.options,
+                        "allow_custom": True,
+                    },
                 )
-            )
+            else:
+                self._emit(
+                    AgentEvent(
+                        type="item.completed",
+                        stage="reflect",
+                        item_type="message",
+                        payload={"content": state["response"]},
+                    )
+                )
             return state, "end"
         if int(state["reflection_count"]) >= self.config.max_reflections:
             state["response"] = reflection.feedback or "目标尚未完成，已达到反思重试上限。"
@@ -338,7 +350,7 @@ class EventDrivenAgent:
         )
 
     def _execute_tool_batch(self, state: AgentState, calls: list[dict[str, Any]]) -> bool:
-        """Execute a model tool batch and return whether approval paused the turn."""
+        """Execute a model tool batch and return whether user interaction paused it."""
         state["tool_calls"] = calls
         # Registry 只并行无副作用调用，并按原始 call 顺序返回结果。
         results = self.registry.execute_many(
@@ -347,14 +359,22 @@ class EventDrivenAgent:
             max_workers=self.config.max_parallel_tools,
         )
         pending: list[dict[str, Any]] = []
+        pending_question: dict[str, Any] | None = None
         for call, result in zip(calls, results):
             self._emit_tool_result(call, result, stage=str(state.get("stage", "main")))
             if result.status == "needs_confirmation":
                 pending.append(call)
                 continue
             self._apply_tool_result(state, call, result)
+            data = result.data if isinstance(result.data, dict) else {}
+            question = data.get("user_question")
+            if isinstance(question, dict) and pending_question is None:
+                pending_question = question
 
         state["approved_tool_calls"] = []
+        if pending_question is not None:
+            self._set_pending_user_question(state, pending_question)
+            return True
         if pending:
             # 审批是可恢复的暂停点：先保存 pending calls，再由下一次输入续跑。
             state["pending_tool_calls"] = pending
@@ -379,6 +399,41 @@ class EventDrivenAgent:
             state["finish_reason"] = "approval_required"
             return True
         return False
+
+    def _set_pending_user_question(
+        self,
+        state: AgentState,
+        question: dict[str, Any],
+    ) -> None:
+        """保存结构化问题，使会话可以在用户回答后继续。"""
+        content = str(question.get("question") or question.get("content") or "").strip()
+        raw_options = question.get("options") or []
+        if not isinstance(raw_options, list):
+            raw_options = []
+        options = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in raw_options
+                if str(item).strip()
+            )
+        )
+        pending = {
+            "question": content,
+            "options": options,
+            "allow_custom": bool(question.get("allow_custom", True)),
+        }
+        state["pending_user_question"] = pending
+        state["finish_reason"] = "user_input_required"
+        self._emit(
+            AgentEvent(
+                type="item.completed",
+                stage=str(state.get("stage", "main")),  # type: ignore[arg-type]
+                item_type="user_question",
+                content=content,
+                payload=pending,
+                options=options,
+            )
+        )
 
     def _apply_tool_result(
         self,
@@ -840,6 +895,12 @@ class EventDrivenAgent:
             self.model_config.reasoning_effort = effort
             self.model_config_loader.save(self.model_config)
         return self.model
+
+    def list_models(self) -> list[str]:
+        """Return models advertised by the configured provider."""
+        if not isinstance(self.model, OpenAICompatibleModel):
+            raise TypeError("当前模型客户端不支持获取模型列表")
+        return self.model.list_models()
 
     def activate_skill(self, name: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
         skill = self.skill_loader.load(name).model_dump()

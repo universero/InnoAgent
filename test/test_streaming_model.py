@@ -31,6 +31,17 @@ class _FakeStreamResponse:
         yield from self.lines
 
 
+class _FakeJSONResponse:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self.payload
+
+
 class StreamingModelTest(unittest.TestCase):
     """Tests for streamed text, tool calls and reasoning."""
 
@@ -52,6 +63,40 @@ class StreamingModelTest(unittest.TestCase):
         self.assertEqual(decision.message, "你好")
         self.assertEqual(tokens, ["你", "好"])
         self.assertEqual(decision.action, "finish")
+
+    def test_model_list_uses_configured_endpoint_and_normalizes_ids(self) -> None:
+        response = _FakeJSONResponse(
+            {
+                "data": [
+                    {"id": "z-model"},
+                    {"id": "a-model"},
+                    {"id": "a-model"},
+                    {"name": "named-model"},
+                ]
+            }
+        )
+        model = OpenAICompatibleModel("secret", "https://example.com/v1", "current-model")
+        with patch("core.llm.responses.httpx.get", return_value=response) as request:
+            models = model.list_models()
+
+        self.assertEqual(
+            models,
+            ["a-model", "current-model", "named-model", "z-model"],
+        )
+        request.assert_called_once_with(
+            "https://example.com/v1/models",
+            headers={"Authorization": "Bearer secret"},
+            timeout=15.0,
+        )
+
+    def test_model_list_rejects_unknown_provider_shape(self) -> None:
+        model = OpenAICompatibleModel("secret", "https://example.com/v1", "")
+        with patch(
+            "core.llm.responses.httpx.get",
+            return_value=_FakeJSONResponse({"unexpected": {}}),
+        ):
+            with self.assertRaisesRegex(ValueError, "模型服务"):
+                model.list_models()
 
     def test_streamed_tool_call_arguments_are_accumulated(self) -> None:
         """Verify streamed function-call arguments are parsed."""

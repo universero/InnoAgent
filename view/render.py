@@ -162,7 +162,10 @@ def render_event(event: dict[str, Any]) -> str:
             detail = payload.get("summary") or payload.get("feedback") or ""
             return f"[reflect {status}] {detail}".rstrip()
         if item_type == "user_question":
-            return f"[question] {payload.get('content', '')}"
+            question = payload.get("question") or payload.get("content", "")
+            options = event.get("options") or payload.get("options") or []
+            choices = f"\n  options: {' / '.join(options)}" if options else ""
+            return f"[question] {question}{choices}"
     if event_type == "approval.requested":
         payload = event.get("payload") or {}
         tool_name = event.get("tool_name") or payload.get("tool_name") or "?"

@@ -154,7 +154,9 @@ ModelBatch
 
 ## 动态模型切换
 
-CLI `/model` 调用 `EventDrivenAgent.update_model()`：
+TTY 中的 CLI `/model` 先调用 `OpenAICompatibleModel.list_models()`，使用当前 `base_url`、`api_key` 请求 OpenAI 兼容的 `GET /models`。Adapter 兼容 `data`、`models` 和字符串/对象条目，在边界完成去重和排序，并保留当前模型作为安全回退。网络失败只显示错误，不修改活动模型。
+
+用户确认候选项后，CLI 调用 `EventDrivenAgent.update_model()`：
 
 1. 校验当前客户端支持动态更新。
 2. 校验 reasoning effort 枚举。
@@ -163,6 +165,8 @@ CLI `/model` 调用 `EventDrivenAgent.update_model()`：
 5. 更新并持久化 ModelConfig。
 
 Subagent 使用共享 ModelStreamConsumer，因此也会使用新模型。重绑定必须覆盖所有阶段，否则主 Agent 与 Planning/Reflection 会出现模型配置漂移。
+
+非 TTY 场景保留参数式切换，便于脚本和测试使用；交互终端不要求用户记忆或手工输入模型 ID。
 
 ## 凭据处理
 
@@ -175,6 +179,7 @@ Subagent 使用共享 ModelStreamConsumer，因此也会使用新模型。重绑
 当前 HTTP 调用：
 
 - 使用 `httpx.stream()`。
+- 模型发现使用 `httpx.get()`，独立设置较短超时。
 - 请求超时固定为 60 秒。
 - 非 2xx 通过 `raise_for_status()` 抛出。
 - Provider failed/incomplete 转成内部失败事件。
