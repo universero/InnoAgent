@@ -1,62 +1,77 @@
-# OpenAI Codex 开源实现研究
+# OpenAI Codex Agent 系统实现研究
 
-本文档集研究 OpenAI `openai/codex` 在固定提交上的实现，而不是依据产品宣传反推架构。结论分为三类：**源码事实**、**官方公开语义**、**设计评价/推断**。源码链接全部固定到提交 `694b6319d3ad2399f6e435760a22d9b9357f0697`，避免 `main` 漂移。
+本文档集不是按 Rust crate 罗列代码，而是按一个软件工程 Agent 必须解决的系统问题组织。每个模块单独成篇，并在同一篇内贯通职责、数据结构、入口、调用链、状态变化、失败恢复、安全边界、测试证据和设计评价。
 
-## 核心结论
+## 研究基线
 
-Codex 不是“CLI 加一个 Agent loop”，而是以 Rust workspace 为主体的多表面 Agent 运行平台：`core` 管理 thread/session/turn，`protocol` 定义领域事件，`app-server` 暴露双向 JSON-RPC，TUI、非交互 exec、SDK 和远端能力复用同一批核心抽象。模型侧统一使用 Responses 语义；工具侧通过 registry、生命周期 hook、审批、exec policy、sandbox 和 Guardian 形成分层控制；会话侧同时维护 rollout JSONL、SQLite 投影与调试 trace。
+- 上游仓库：`openai/codex`
+- 固定提交：`694b6319d3ad2399f6e435760a22d9b9357f0697`
+- 源码链接：全部固定到该提交，避免 `main` 漂移
+- 研究方法：代码知识图谱调用链、源码静态阅读、测试反证、OpenAI 官方 Codex 文档交叉核验
+- 动态验证限制：当前环境没有 `cargo`，因此没有执行 Rust 编译和测试；所有“已验证”均指源码和测试代码静态核验
 
-最值得 InnoAgent 借鉴的是协议与表面分离、单线程提交循环、显式工具生命周期、fail-closed 审批、存储中立接口、事件化可观测性。最不应照搬的是 126 个左右 crate 的组织规模、巨型中央分发函数、旧新权限模型并存，以及 JSONL/SQLite/trace 三套状态表示带来的同步成本。
+## Agent 系统模块地图
 
-## 阅读导航
+| 模块 | Agent 系统要解决的问题 | 文档 |
+|---|---|---|
+| 系统边界 | 进程、crate 和产品表面如何映射为一套 Agent 平台 | [00-system-map-and-methodology.md](00-system-map-and-methodology.md) |
+| 运行时控制循环 | 用户输入如何变成一个可取消、可转向、可恢复的 turn | [01-agent-runtime-and-control-loop.md](01-agent-runtime-and-control-loop.md) |
+| 事件模型 | 模型、工具、生命周期事件如何定义、关联、流转和兼容 | [02-event-model-and-protocol-flow.md](02-event-model-and-protocol-flow.md) |
+| 上下文工程 | 指令、环境、历史和工具结果如何组装、更新、裁剪、压缩 | [03-context-engineering-and-compaction.md](03-context-engineering-and-compaction.md) |
+| 模型客户端 | Responses 请求、SSE/WebSocket、重试和错误恢复如何工作 | [04-model-client-streaming-and-retry.md](04-model-client-streaming-and-retry.md) |
+| 工具体系 | 工具注册、分发、长输出、长文件、并发和失败如何治理 | [05-tool-system-and-output-governance.md](05-tool-system-and-output-governance.md) |
+| 权限与安全 | 审批、exec policy、Guardian、sandbox 如何逐层拦截 | [06-permission-approval-policy-and-guardian.md](06-permission-approval-policy-and-guardian.md) |
+| 执行与文件系统 | shell、后台终端、apply_patch 和跨平台隔离如何落地 | [07-sandbox-exec-and-filesystem.md](07-sandbox-exec-and-filesystem.md) |
+| 会话与持久化 | rollout、SQLite、resume/fork/rollback 如何保持状态一致 | [08-session-storage-rollout-and-resume.md](08-session-storage-rollout-and-resume.md) |
+| 服务与客户端表面 | App Server 如何把 core 暴露给 TUI、exec 和 SDK | [09-app-server-and-client-surfaces.md](09-app-server-and-client-surfaces.md) |
+| 扩展系统 | MCP、skills、plugins、hooks、memory 如何注入能力和上下文 | [10-mcp-skills-plugins-hooks-and-memory.md](10-mcp-skills-plugins-hooks-and-memory.md) |
+| 多 Agent 与长期任务 | 子 Agent、mailbox、goal、queue、realtime 如何协作 | [11-multi-agent-goal-queue-and-realtime.md](11-multi-agent-goal-queue-and-realtime.md) |
+| 平台治理 | 配置、认证、模型目录、可观测性、测试和发布如何兜底 | [12-config-auth-observability-testing.md](12-config-auth-observability-testing.md) |
+| 综合评价 | 关键设计取舍、风险和 InnoAgent 的落地顺序 | [13-design-assessment-and-lessons.md](13-design-assessment-and-lessons.md) |
 
-| 文档 | 主题 |
-|---|---|
-| [00-baseline-methodology.md](00-baseline-methodology.md) | 基线、方法、证据等级、限制 |
-| [01-repository-architecture.md](01-repository-architecture.md) | 仓库结构、依赖方向、模块边界 |
-| [02-entrypoints-process-topology.md](02-entrypoints-process-topology.md) | CLI/TUI/exec/App Server 入口与进程拓扑 |
-| [03-core-runtime-turn-loop.md](03-core-runtime-turn-loop.md) | ThreadManager、Session、submission loop、turn loop |
-| [04-model-context-compaction.md](04-model-context-compaction.md) | Responses、Prompt、上下文、压缩、重试 |
-| [05-tools-exec-approvals-sandbox.md](05-tools-exec-approvals-sandbox.md) | 工具路由、命令执行、审批、策略与隔离 |
-| [06-config-auth-models.md](06-config-auth-models.md) | 配置层、认证、provider 与本地模型 |
-| [07-protocol-app-server.md](07-protocol-app-server.md) | 协议版本、JSON-RPC、线程与 turn API |
-| [08-storage-rollout-resume.md](08-storage-rollout-resume.md) | rollout、SQLite、恢复、历史与附件 |
-| [09-cli-tui-exec-sdk.md](09-cli-tui-exec-sdk.md) | 各交互表面和 TypeScript/Python SDK |
-| [10-extensions-mcp-skills-plugins-hooks-memory.md](10-extensions-mcp-skills-plugins-hooks-memory.md) | Extension、MCP、Skills、Plugin、Hook、Memory |
-| [11-remote-cloud-realtime-multi-agent.md](11-remote-cloud-realtime-multi-agent.md) | Cloud、环境、实时语音、工作树与多 Agent |
-| [12-testing-build-release-observability.md](12-testing-build-release-observability.md) | 测试、构建、发布、遥测与诊断 |
-| [13-design-assessment-innoagent-lessons.md](13-design-assessment-innoagent-lessons.md) | 设计评价与 InnoAgent 落地路线 |
-| [14-crate-catalog.md](14-crate-catalog.md) | Rust crate 与非 Rust package 完整目录 |
-| [15-core-internals.md](15-core-internals.md) | Core 内部模块、状态对象与完整调用链 |
-| [16-model-network-internals.md](16-model-network-internals.md) | 模型协议、传输、provider 与重试实现 |
-| [17-tool-sandbox-internals.md](17-tool-sandbox-internals.md) | 工具执行、命令会话、安全决策与平台隔离实现 |
-| [18-app-server-protocol-internals.md](18-app-server-protocol-internals.md) | App Server processors、RPC、通知与连接状态实现 |
-| [19-storage-internals.md](19-storage-internals.md) | ThreadStore、rollout、SQLite 与恢复实现 |
-| [20-extension-internals.md](20-extension-internals.md) | Extension、MCP、Plugin、Skill、Hook 与 Memory 实现 |
-| [21-surfaces-internals.md](21-surfaces-internals.md) | CLI、TUI、exec 与两套 SDK 实现 |
-| [22-platform-utilities-internals.md](22-platform-utilities-internals.md) | Cloud、实时、构建、可观测与 utilities 实现 |
-| [23-verification-matrix.md](23-verification-matrix.md) | 全模块证据、风险与验证状态矩阵 |
-| [24-crate-implementation-notes.md](24-crate-implementation-notes.md) | 每个 crate/package 的实现机制、输入输出和边界 |
-| [25-end-to-end-sequences.md](25-end-to-end-sequences.md) | 启动、turn、工具、恢复、MCP、子 Agent 的端到端时序 |
-| [26-config-auth-internals.md](26-config-auth-internals.md) | 配置分层、受管约束、权限投影与认证刷新实现 |
+## 一次 turn 的总链路
 
-## 覆盖矩阵
+```text
+TUI / exec / SDK / App Server
+  -> ThreadManager 定位或创建 Session
+  -> Submission 队列串行接收 Op
+  -> Session 创建 TurnContext / StepContext
+  -> ContextManager + world state + instructions 形成 Prompt
+  -> ModelClientSession 通过 Responses API 流式采样
+  -> ResponseEvent 转 ResponseItem 和 EventMsg
+  -> ToolRouter / ToolRegistry 分发工具
+  -> hook -> approval -> exec policy -> Guardian -> sandbox -> handler
+  -> 工具结果裁剪后写回历史，再次采样
+  -> AgentMessage 或终止条件结束 turn
+  -> rollout / SQLite / notifications / telemetry 同步落地
+```
 
-| 能力域 | 主要实现 | 深入文档 | 覆盖 |
-|---|---|---|---|
-| 会话/线程/turn | `core`, `protocol`, `thread-store` | 03, 08 | 已核验调用链 |
-| 模型请求/流式传输 | `core/client`, `codex-api`, `codex-client` | 04 | 已核验 fallback 与重试 |
-| 工具/执行/补丁 | `core/tools`, `exec-server`, `apply-patch` | 05 | 已核验生命周期与审批 |
-| 沙箱/权限 | `sandboxing`, platform sandbox crates | 05 | 已核验三平台与 fail-closed |
-| 配置/认证/provider | `config`, `login`, `model-provider*` | 06 | 已核验优先级和分层 |
-| App Server/协议 | `app-server*`, `app-server-protocol*` | 07 | 已核验 request dispatch |
-| 持久化/恢复 | `rollout`, `state`, `thread-store` | 08 | 已核验多表示模型 |
-| CLI/TUI/SDK | `cli`, `tui`, `exec`, `sdk/*` | 02, 09 | 已核验 SDK 差异 |
-| MCP/扩展/plugin/skill | `ext/*`, `codex-mcp`, `core-plugins` | 10 | 已核验贡献点 |
-| 多 Agent/云/实时 | `agent-*`, `cloud-*`, `realtime-webrtc` | 11 | 已核验边界与入口 |
-| 测试/发布/遥测 | tests, Bazel/Cargo/pnpm, `otel*` | 12 | 静态盘点 |
-| 全部 crate | `codex-rs/**/Cargo.toml` | 14 | 逐项归类 |
+## 贯穿全书的四个结论
 
-## 一句话架构图
+1. Codex 的核心不是一个 `while tool_call`，而是带有 submission 串行化、turn/step 双层上下文、异步工具 future、审批挂起、事件投影和持久化的状态机。
+2. 上下文并不存放在一个字符串中。模型基础指令、权限说明、项目指令、skills、环境、会话历史、运行时 world state 和工具结果分别产生，再在采样前投影为 `Prompt`。
+3. 工具安全不是一次判断。工具可见性、参数解析、PreToolUse hook、审批策略、Guardian、exec policy、sandbox transform 和平台内核隔离组成多道门。
+4. Codex 对“大输出”有明确治理，但对“同一普通工具反复失败”没有统一的调用级熔断器；现有熔断只覆盖 Guardian 连续拒绝和 Goal 跨 turn 执行失败等特定场景。
 
-`CLI/TUI/exec/SDK/App Server -> ThreadManager -> Session submission loop -> run_turn -> Responses stream -> ToolRouter -> hooks/approval/policy/sandbox -> events + rollout/thread store + telemetry`。
+## 证据标签
+
+- **源码事实**：可以在固定提交的实现或测试中直接找到。
+- **官方语义**：来自 OpenAI 官方 Codex 文档，用于解释公开契约。
+- **设计评价**：基于源码事实做出的工程判断，不代表 OpenAI 官方结论。
+- **未证实**：源码未找到通用实现，明确写出缺口而不是凭经验补全。
+
+## 推荐阅读顺序
+
+先读 `00 -> 01 -> 02 -> 03 -> 05 -> 06`，这六篇构成 Agent 主干；之后按需要阅读模型传输、执行沙箱、存储、App Server、扩展、多 Agent 和平台治理。
+
+## 官方资料
+
+- [Open source Codex](https://learn.chatgpt.com/docs/open-source.md)：开源实现与产品边界。
+- [Codex App Server](https://learn.chatgpt.com/docs/app-server.md)：双向 JSON-RPC、thread/turn 与通知契约。
+- [Sandboxing](https://learn.chatgpt.com/docs/sandboxing.md)：平台隔离和审批语义。
+- [AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md.md)：项目指令发现和层级。
+- [MCP](https://learn.chatgpt.com/docs/extend/mcp.md)：外部工具和资源接入。
+- [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk.md)：嵌入式客户端表面。
+- [Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode.md)：exec/JSONL 自动化接口。
+
+这些资料用于校验公开语义；实现细节仍以固定提交源码为准。
