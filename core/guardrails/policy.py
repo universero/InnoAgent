@@ -18,3 +18,6 @@ class RunMode(str, Enum):
     @property
     def should_confirm_write(self) -> bool:
         return self is RunMode.ASK
+
+    def __str__(self) -> str:
+        return str(self.value)

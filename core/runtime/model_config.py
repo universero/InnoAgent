@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 
@@ -45,26 +44,21 @@ class ModelConfigLoader:
     """Load model config from files, environment, or the user."""
 
     def __init__(
-        self,
-        project_root: str | Path = ".",
-        global_root: str | Path | None = None,
-        input_fn: Callable[[str], str] | None = None,
-        output_fn: Callable[[str], None] | None = None,
+            self,
+            project_root: str | Path = ".",
+            input_fn: Callable[[str], str] | None = None,
+            output_fn: Callable[[str], None] | None = None,
     ) -> None:
-        """Resolve project and global configuration paths."""
-        self.project_root = Path(project_root).expanduser().resolve()
-        self.project_config_path = self.project_root / ".innoagent" / "config.json"
-        self.global_root = (
-            Path(global_root).expanduser()
-            if global_root is not None
-            else Path.home() / ".innoagent"
-        )
-        self.global_config_path = self.global_root / "config.json"
+        """读取项目或全局的配置"""
+        self.project_root = Path(project_root).expanduser().resolve()  # 项目目录
+        self.project_config_path = self.project_root / ".innoagent" / "config.json"  # 项目级别配置文件
+        self.global_root = (Path.home() / ".innoagent")  # 全局根目录
+        self.global_config_path = self.global_root / "config.json"  # 全局配置文件
         self.input_fn = input_fn or input
         self.output_fn = output_fn or print
 
     def load(self) -> ModelConfig:
-        """Return a config using the documented precedence order."""
+        """返回优先级最高的配置"""
         project_config = self._read_file(self.project_config_path, "project")
         if project_config:
             return project_config

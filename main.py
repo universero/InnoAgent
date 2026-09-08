@@ -13,7 +13,7 @@ def main() -> None:
         RuntimeConfig(
             workspace_root=".",
             mode=RunMode.ASK,
-            max_iterations=50,
+            max_iterations=150,
         )
     )
     model_config = ModelConfigLoader(project_root=config.workspace_root).load()

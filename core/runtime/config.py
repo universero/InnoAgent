@@ -32,19 +32,13 @@ class RuntimeConfig:
 
     @property
     def allowed_roots(self) -> list[str]:
-        """Return the workspace path allowed for file tools."""
+        """返回工作工具根目录的最对路径"""
         return [str(Path(self.workspace_root).expanduser().resolve())]
 
     @property
     def compact_threshold_tokens(self) -> int:
-        """Return the configured automatic-compaction boundary in tokens."""
-        return max(
-            1,
-            min(
-                self.max_context_tokens - 1,
-                int(self.max_context_tokens * self.compact_threshold),
-            ),
-        )
+        """根据配置的阈值计算实际要压缩的tokens数量"""
+        return max(1, min(self.max_context_tokens - 1, int(self.max_context_tokens * self.compact_threshold)))
 
 
 class RuntimeConfigStore:
@@ -54,16 +48,14 @@ class RuntimeConfigStore:
         self.path = Path(project_root).expanduser().resolve() / ".innoagent" / "config.json"
 
     def load(self, config: RuntimeConfig | None = None) -> RuntimeConfig:
-        """Overlay valid project runtime settings on an existing config."""
+        """加载当前目录配置"""
         resolved = config or RuntimeConfig()
-        data = self._read()
-        runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
+        data = self._read()  # 当前目录配置
+        runtime = data.get("runtime", {}) if isinstance(data.get("runtime"), dict) else {}
         try:
             max_tokens = int(runtime.get("max_context_tokens", resolved.max_context_tokens))
             threshold = float(runtime.get("compact_threshold", resolved.compact_threshold))
-            keep_tokens = int(
-                runtime.get("compact_keep_recent_tokens", resolved.compact_keep_recent_tokens)
-            )
+            keep_tokens = int(runtime.get("compact_keep_recent_tokens", resolved.compact_keep_recent_tokens))
             self._validate(max_tokens, threshold, keep_tokens)
         except (TypeError, ValueError):
             return resolved
@@ -91,16 +83,17 @@ class RuntimeConfigStore:
         return self.path
 
     def _read(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
+        """读取当前路径配置"""
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            with self.path.open(encoding="utf-8") as f:
+                data = json.load(f)
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
 
     @staticmethod
     def _validate(max_tokens: int, threshold: float, keep_tokens: int) -> None:
+        """校验配置有效性"""
         if max_tokens < 1024:
             raise ValueError("max context tokens must be at least 1024")
         if not 0.01 <= threshold < 1.0:

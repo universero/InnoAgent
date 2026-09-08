@@ -10,10 +10,8 @@ from typing import Literal
 
 from prompt_toolkit.styles import Style
 
-
 ColorScheme = Literal["light", "dark"]
 AppearanceReader = Callable[[], str | None]
-
 
 # 两套模板保持相同的语义键，渲染层只表达含义，不感知具体颜色。
 _LIGHT_TUI_RULES = {
@@ -134,10 +132,10 @@ _DARK_OUTPUT_RULES = {
 
 
 def detect_color_scheme(
-    *,
-    environ: Mapping[str, str] | None = None,
-    platform_name: str | None = None,
-    macos_appearance_reader: AppearanceReader | None = None,
+        *,
+        environ: Mapping[str, str] | None = None,
+        platform_name: str | None = None,
+        macos_appearance_reader: AppearanceReader | None = None,
 ) -> ColorScheme:
     """Detect the terminal color scheme, with an explicit override for reliability."""
     current_environ = os.environ if environ is None else environ
@@ -157,7 +155,7 @@ def detect_color_scheme(
         appearance = reader()
         if appearance and appearance.strip().casefold() == "dark":
             return "dark"
-    elif current_platform == "Windows": # windows theme
+    elif current_platform == "Windows":  # windows theme
         import winreg
         try:
             with winreg.OpenKey(
@@ -168,7 +166,7 @@ def detect_color_scheme(
                 return "light" if value else "dark"
         except (FileNotFoundError, OSError):
             pass
-    elif current_platform.lower().startswith("linux"):
+    elif current_platform == "Linux":
         import subprocess
         try:
             result = subprocess.run(
@@ -178,7 +176,7 @@ def detect_color_scheme(
                 timeout=1,
             )
             value = result.stdout.strip().strip("'")
-            if value == "prefer-dark":
+            if value == "prefer-dark" or value == 'default':
                 return "dark"
             if value == "prefer-light":
                 return "light"
