@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from core.guardrails.base import BaseGuardrail, GuardrailDecision
-from core.guardrails.policy import is_readonly, should_confirm_write
 from core.tool.base import BaseTool, ToolContext, ToolResult
 
 
@@ -62,10 +61,10 @@ class PathGuard(BaseGuardrail):
     name = "path"
 
     def before(
-        self,
-        tool: BaseTool,
-        arguments: dict[str, Any],
-        context: ToolContext,
+            self,
+            tool: BaseTool,
+            arguments: dict[str, Any],
+            context: ToolContext,
     ) -> GuardrailDecision:
         """Reject paths outside the allowed workspace roots."""
         raw_path = arguments.get("path")
@@ -88,10 +87,10 @@ class WriteBeforeReadGuard(BaseGuardrail):
     name = "write_before_read"
 
     def before(
-        self,
-        tool: BaseTool,
-        arguments: dict[str, Any],
-        context: ToolContext,
+            self,
+            tool: BaseTool,
+            arguments: dict[str, Any],
+            context: ToolContext,
     ) -> GuardrailDecision:
         """Collect target state before a write operation."""
         if not tool.is_write:
@@ -106,17 +105,17 @@ class WriteBeforeReadGuard(BaseGuardrail):
 
 
 class FileConfirmationGuard(BaseGuardrail):
-    """Request confirmation for writes in ``confirm`` mode."""
+    """Request confirmation for writes in ``ask`` mode."""
 
     name = "file_confirmation"
 
     def before(
-        self,
-        tool: BaseTool,
-        arguments: dict[str, Any],
-        context: ToolContext,
+            self,
+            tool: BaseTool,
+            arguments: dict[str, Any],
+            context: ToolContext,
     ) -> GuardrailDecision:
-        """Request confirmation for writes in confirm mode."""
+        """Request confirmation for writes in ask mode."""
         if self._is_approved(tool.name, arguments, context.approved_tool_calls, context):
             return GuardrailDecision()
         if self._is_approved(tool.name, arguments, context.denied_tool_calls, context):
@@ -135,16 +134,13 @@ class FileConfirmationGuard(BaseGuardrail):
                 )
             if decision == "allow":
                 return GuardrailDecision()
-        if is_readonly(context.mode) and tool.is_write:
+        if context.mode.is_readonly() and tool.is_write:
             return GuardrailDecision(
                 allowed=False,
                 status="blocked",
                 reason="write operation is not allowed in readonly mode",
             )
-        if should_confirm_write(
-            context.mode,
-            tool.is_write or tool.requires_confirmation,
-        ):
+        if context.mode.should_confirm_write and (tool.is_write or tool.requires_confirmation):
             return GuardrailDecision(
                 allowed=False,
                 status="needs_confirmation",
@@ -155,10 +151,10 @@ class FileConfirmationGuard(BaseGuardrail):
 
     @staticmethod
     def _is_approved(
-        tool_name: str,
-        arguments: dict[str, Any],
-        approved: list[dict[str, Any]],
-        context: ToolContext,
+            tool_name: str,
+            arguments: dict[str, Any],
+            approved: list[dict[str, Any]],
+            context: ToolContext,
     ) -> bool:
         """Return whether the current call matches an approved confirmation."""
         expected = dict(arguments)
@@ -175,10 +171,10 @@ class FileConfirmationGuard(BaseGuardrail):
         return False
 
     def after(
-        self,
-        tool: BaseTool,
-        result: ToolResult,
-        context: ToolContext,
+            self,
+            tool: BaseTool,
+            result: ToolResult,
+            context: ToolContext,
     ) -> ToolResult:
         """Return the tool result unchanged after confirmation checks."""
         return result
@@ -190,13 +186,13 @@ class ReadOnlyGuard(BaseGuardrail):
     name = "readonly"
 
     def before(
-        self,
-        tool: BaseTool,
-        arguments: dict[str, Any],
-        context: ToolContext,
+            self,
+            tool: BaseTool,
+            arguments: dict[str, Any],
+            context: ToolContext,
     ) -> GuardrailDecision:
         """Block write tools when running in readonly mode."""
-        if is_readonly(context.mode) and tool.is_write:
+        if context.mode.is_readonly and tool.is_write:
             return GuardrailDecision(
                 allowed=False,
                 status="blocked",

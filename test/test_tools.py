@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from core.guardrails.base import BaseGuardrail
+from core.guardrails.policy import RunMode
 from core.tool.base import ToolAuthorization, ToolContext, ToolSpec
 from core.tool.grep_tool import GrepTool
 from core.tool.ls_tool import LsTool
@@ -34,13 +35,13 @@ class ToolRegistryTest(unittest.TestCase):
             result = registry.execute_tool("write", {"path": str(Path(tmp) / "a.txt"), "content": "x"}, context)
             self.assertEqual(result.status, "blocked")
 
-    def test_write_requires_confirmation_in_confirm_mode(self) -> None:
-        """Verify writes require confirmation in confirm mode."""
+    def test_write_requires_confirmation_in_ask_mode(self) -> None:
+        """Verify writes require confirmation in ask mode."""
         registry = ToolRegistry()
         registry.set_default_guardrails()
         registry.register(WriteTool())
         with tempfile.TemporaryDirectory() as tmp:
-            context = ToolContext(mode="confirm", allowed_roots=[tmp])
+            context = ToolContext(mode=RunMode.ASK, allowed_roots=[tmp])
             result = registry.execute_tool("write", {"path": str(Path(tmp) / "a.txt"), "content": "x"}, context)
             self.assertEqual(result.status, "needs_confirmation")
 

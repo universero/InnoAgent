@@ -7,33 +7,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.guardrails.policy import RunMode, normalize_mode
+from core.guardrails.policy import RunMode
 
 
 @dataclass
 class RuntimeConfig:
-    """User-configurable runtime settings."""
-    workspace_root: str = "."
-    mode: str = "ask"
-    max_iterations: int = 20
-    max_reflections: int = 3
-    max_context_tokens: int = 128000
-    compact_reserve_tokens: int = 16000
-    compact_threshold: float = 0.8
-    compact_keep_recent_tokens: int = 12000
-    max_tool_output_chars: int = 30000
-    max_parallel_tools: int = 4
-    profile_root: str = ".innoagent/profiles"
-    session_root: str = ".innoagent/sessions"
-    memory_enabled: bool = True
-    turn_threshold: int = 4
-    input_token_threshold: int = 1200
-    extra: dict = field(default_factory=dict)
-
-    @property
-    def normalized_mode(self) -> RunMode:
-        """Return a validated run mode."""
-        return normalize_mode(self.mode)
+    """用户可配置的运行时参数"""
+    workspace_root: str = "."  # 工作目录
+    mode: RunMode = RunMode.ASK  # 权限询问模式
+    max_iterations: int = 20  # 单次最大模型思考轮数
+    max_reflections: int = 3  # 最大反思次数
+    max_context_tokens: int = 128000  # 上下文最大token数
+    compact_reserve_tokens: int = 16000  # 压缩后最大保留token数
+    compact_threshold: float = 0.8  # 压缩阈值, 上下文百分比
+    compact_keep_recent_tokens: int = 12000  # 保留的最近的token数
+    max_tool_output_chars: int = 30000  # 工具最大输出字符数
+    max_parallel_tools: int = 4  # 最大同时并行工具数
+    profile_root: str = ".innoagent/profiles"  # 用户个人画像存储位置
+    session_root: str = ".innoagent/sessions"  # session信息存储位置
+    memory_enabled: bool = True  # 是否开启记忆
+    turn_threshold: int = 16  # 记忆更新阈值
+    input_token_threshold: int = 1200  # 输入token上限
+    extra: dict = field(default_factory=dict)  # 额外配置
 
     @property
     def allowed_roots(self) -> list[str]:

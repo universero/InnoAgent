@@ -231,7 +231,6 @@ explicit deny
 - `ask`：写能力和显式 `requires_confirmation` 工具需要审批，命中规则时除外。
 - `auto`：允许工作区内工具自动执行，但 deny、路径边界和其他 guardrail 仍然生效。
 - `readonly`：禁止写能力；审批不能绕过 readonly。
-- `confirm`：旧配置别名，读取时归一化为 `ask`，不再作为独立行为扩展。
 
 审批决策：
 

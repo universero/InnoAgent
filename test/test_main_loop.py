@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core.guardrails.policy import RunMode
 from core.runtime.agent import InnoAgentRuntime
 from core.runtime.config import RuntimeConfig
 from core.llm import BaseModelClient, ModelDecision, ToolCallDecision
@@ -177,14 +178,14 @@ class MainLoopTest(unittest.TestCase):
                 tool_message["tool_call_id"],
             )
 
-    def test_confirm_mode_write_requires_approval_then_executes(self) -> None:
-        """Verify confirm mode blocks writes until approval."""
+    def test_ask_mode_write_requires_approval_then_executes(self) -> None:
+        """Verify ask mode blocks writes until approval."""
         with tempfile.TemporaryDirectory() as tmp:
             config = RuntimeConfig(
                 workspace_root=tmp,
                 profile_root=str(Path(tmp) / "profiles"),
                 session_root=str(Path(tmp) / "sessions"),
-                mode="confirm",
+                mode=RunMode.ASK,
                 memory_enabled=False,
             )
             runtime = InnoAgentRuntime(config, model=FakeModel())

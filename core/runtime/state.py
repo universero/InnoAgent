@@ -37,7 +37,7 @@ class AgentState(TypedDict, total=False):
 
     memory_profile: dict[str, Any]
     memory_updated: bool
-    mode: Literal["auto", "ask", "confirm", "readonly"]
+    mode: Literal["auto", "ask", "readonly"]
     approved_tool_calls: list[dict[str, Any]]
     denied_tool_calls: list[dict[str, Any]]
     pending_tool_calls: list[dict[str, Any]]

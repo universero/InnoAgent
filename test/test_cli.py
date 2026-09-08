@@ -47,12 +47,34 @@ class CliTest(unittest.TestCase):
 
     def test_parse_slash_command(self) -> None:
         """Verify slash command parsing."""
-        command = parse_command("/mode confirm")
+        command = parse_command("/mode readonly")
         self.assertIsNotNone(command)
         self.assertEqual(command.name, "mode")
-        self.assertEqual(command.args, ["confirm"])
+        self.assertEqual(command.args, ["readonly"])
         self.assertTrue(command_info("rename")["known"])
         self.assertTrue(command_info("steer")["known"])
+
+    def test_mode_command_rejects_unknown_modes(self) -> None:
+        """Verify only ask, auto, and readonly are accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs: list[str] = []
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    memory_enabled=False,
+                ),
+                model=FakeModel(),
+            )
+            cli = InnoAgentCLI(runtime, output_fn=outputs.append)
+
+            cli._handle_command(parse_command("/mode confirm"))
+            self.assertEqual(runtime.config.mode, "ask")
+            self.assertIn("valid modes: ask, auto, readonly", outputs)
+
+            cli._handle_command(parse_command("/mode auto"))
+            self.assertEqual(runtime.config.mode, "auto")
 
     def test_context_command_updates_and_persists_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

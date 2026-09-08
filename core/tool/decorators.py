@@ -31,7 +31,7 @@ def write_tool(cls: T) -> T:
 
 
 def confirm_write(cls: T) -> T:
-    """Mark a tool as requiring confirmation in confirm mode."""
+    """Mark a tool as requiring confirmation in ask mode."""
     cls.is_write = True
     cls.requires_confirmation = True
     tool_registry.register(cls())

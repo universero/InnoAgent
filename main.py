@@ -1,8 +1,7 @@
-"""InnoAgent command-line entry point."""
-
 from __future__ import annotations
 
 from core.agent.react import EventDrivenAgent
+from core.guardrails.policy import RunMode
 from core.runtime.config import RuntimeConfig, RuntimeConfigStore
 from core.llm import OpenAICompatibleModel
 from core.runtime.model_config import ModelConfigLoader
@@ -10,12 +9,11 @@ from view.cli import InnoAgentCLI
 
 
 def main() -> None:
-    """Load model config, build the runtime and start the CLI."""
     config = RuntimeConfigStore(".").load(
         RuntimeConfig(
             workspace_root=".",
-            mode="ask",
-            max_iterations=20,
+            mode=RunMode.ASK,
+            max_iterations=50,
         )
     )
     model_config = ModelConfigLoader(project_root=config.workspace_root).load()

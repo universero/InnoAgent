@@ -589,7 +589,7 @@ class InnoAgentCLI:
             if not args:
                 self.output_fn(f"mode: {self.runtime.config.mode}")
                 return
-            mode = "ask" if args[0] == "confirm" else args[0]
+            mode = args[0]
             if mode not in {"ask", "auto", "readonly"}:
                 self.output_fn("valid modes: ask, auto, readonly")
                 return

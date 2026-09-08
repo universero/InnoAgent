@@ -95,7 +95,7 @@ def render_tools(runtime: InnoAgentRuntime, state: dict[str, Any] | None = None)
     from core.tool.base import ToolContext
 
     context = ToolContext(
-        mode=runtime.config.normalized_mode,
+        mode=runtime.config.mode,
         allowed_roots=runtime.config.allowed_roots,
         state=state or {},
     )

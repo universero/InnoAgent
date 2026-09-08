@@ -13,6 +13,7 @@ from core.agent.stages import StageRunner
 from core.agent.subagent import SubagentRunner
 from core.config.permissions import PermissionStore
 from core.event.events import AgentEvent
+from core.guardrails.policy import RunMode
 from core.llm import BaseModelClient, OpenAICompatibleModel
 from core.memory.profile import ProfileStore
 from core.memory.recall import MemoryRecall
@@ -34,7 +35,7 @@ from core.tool.approval import (
 )
 from core.tool.base import ToolAuthorization, ToolContext, ToolResult
 from core.tool.registry import ToolRegistry, tool_registry
-
+from typing import Literal
 
 _GOAL_UNSET = object()
 
@@ -66,14 +67,14 @@ class EventDrivenAgent:
     """Own the model loop, tools, permissions, context, and session events."""
 
     def __init__(
-        self,
-        config: RuntimeConfig | None = None,
-        model: BaseModelClient | None = None,
-        registry: ToolRegistry | None = None,
-        stream_handler: Callable[[dict[str, Any]], None] | None = None,
-        model_config: ModelConfig | None = None,
-        model_config_loader: ModelConfigLoader | None = None,
-        summarizer: Callable[[str], str] | None = None,
+            self,
+            config: RuntimeConfig | None = None,
+            model: BaseModelClient | None = None,
+            registry: ToolRegistry | None = None,
+            stream_handler: Callable[[dict[str, Any]], None] | None = None,
+            model_config: ModelConfig | None = None,
+            model_config_loader: ModelConfigLoader | None = None,
+            summarizer: Callable[[str], str] | None = None,
     ) -> None:
         if model is None:
             raise ValueError("EventDrivenAgent requires a model client")
@@ -127,11 +128,11 @@ class EventDrivenAgent:
         self._stop_requests: set[str] = set()
 
     def new_state(
-        self,
-        user_input: str,
-        *,
-        session_id: str | None = None,
-        goal: str | None = None,
+            self,
+            user_input: str,
+            *,
+            session_id: str | None = None,
+            goal: str | None = None,
     ) -> tuple[AgentState, str]:
         """Create a well-formed state without persisting a session."""
         sid = session_id or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
@@ -147,13 +148,13 @@ class EventDrivenAgent:
         return state, sid
 
     def invoke(
-        self,
-        user_input: str,
-        *,
-        session_id: str | None = None,
-        goal: str | None | object = _GOAL_UNSET,
-        active_skills: list[dict[str, Any]] | None = None,
-        restart_goal: bool = False,
+            self,
+            user_input: str,
+            *,
+            session_id: str | None = None,
+            goal: str | None | object = _GOAL_UNSET,
+            active_skills: list[dict[str, Any]] | None = None,
+            restart_goal: bool = False,
     ) -> AgentState:
         """Execute one user turn and persist replayable events."""
         new_session = session_id is None
@@ -384,12 +385,12 @@ class EventDrivenAgent:
         return state, "main_agent"
 
     def _call_model(
-        self,
-        context: str,
-        state: dict[str, Any],
-        *,
-        stage: str,
-        tool_schemas: list[dict[str, Any]] | None = None,
+            self,
+            context: str,
+            state: dict[str, Any],
+            *,
+            stage: str,
+            tool_schemas: list[dict[str, Any]] | None = None,
     ) -> ModelBatch:
         """Call the model through the shared stream consumer."""
         schemas = tool_schemas if tool_schemas is not None else self.registry.tool_schemas(
@@ -428,7 +429,7 @@ class EventDrivenAgent:
                 if authorization.reason:
                     pending_reasons.append(authorization.reason)
                 # 审批是执行顺序屏障，后续调用必须等当前调用处理后再授权和执行。
-                deferred = [dict(item) for item in calls[index + 1 :]]
+                deferred = [dict(item) for item in calls[index + 1:]]
                 break
             if not authorization.allowed:
                 results[index] = authorization.to_result()
@@ -490,9 +491,9 @@ class EventDrivenAgent:
         return pending_question is not None
 
     def _set_pending_user_question(
-        self,
-        state: AgentState,
-        question: dict[str, Any],
+            self,
+            state: AgentState,
+            question: dict[str, Any],
     ) -> None:
         """保存结构化问题，使会话可以在用户回答后继续。"""
         content = str(question.get("question") or question.get("content") or "").strip()
@@ -525,10 +526,10 @@ class EventDrivenAgent:
         )
 
     def _apply_tool_result(
-        self,
-        state: AgentState,
-        call: dict[str, Any],
-        result: ToolResult,
+            self,
+            state: AgentState,
+            call: dict[str, Any],
+            result: ToolResult,
     ) -> None:
         dumped = result.model_dump()
         state["tool_results"] = list(state.get("tool_results", [])) + [dumped]
@@ -701,11 +702,11 @@ class EventDrivenAgent:
         return True
 
     def _compact_state(
-        self,
-        state: AgentState,
-        *,
-        trigger: str,
-        focus: str | None = None,
+            self,
+            state: AgentState,
+            *,
+            trigger: str,
+            focus: str | None = None,
     ) -> None:
         messages = SessionHistory.from_dicts(state.get("messages", [])).messages
         self._emit(
@@ -805,7 +806,7 @@ class EventDrivenAgent:
 
     def _tool_context(self, state: dict[str, Any]) -> ToolContext:
         return ToolContext(
-            mode=self.config.normalized_mode,
+            mode=self.config.mode,
             allowed_roots=self.config.allowed_roots,
             state=dict(state),
             approved_tool_calls=list(state.get("approved_tool_calls", [])),
@@ -820,11 +821,11 @@ class EventDrivenAgent:
         )
 
     def _emit_tool_result(
-        self,
-        call: dict[str, Any],
-        result: ToolResult,
-        *,
-        stage: str = "main",
+            self,
+            call: dict[str, Any],
+            result: ToolResult,
+            *,
+            stage: str = "main",
     ) -> None:
         self._emit(
             AgentEvent(
@@ -841,7 +842,7 @@ class EventDrivenAgent:
 
     def _emit(self, event: AgentEvent | dict[str, Any]) -> None:
         persistent = event.persistent if isinstance(event, AgentEvent) else (
-            event.get("type") != "item.delta" and not event.get("is_delta", False)
+                event.get("type") != "item.delta" and not event.get("is_delta", False)
         )
         if isinstance(event, AgentEvent):
             if event.session_id is None:
@@ -871,11 +872,11 @@ class EventDrivenAgent:
             self._run_active = False
 
     def submit_steering(
-        self,
-        content: str,
-        *,
-        session_id: str | None = None,
-        delivery: Literal["after_tool", "immediate"] = "after_tool",
+            self,
+            content: str,
+            *,
+            session_id: str | None = None,
+            delivery: Literal["after_tool", "immediate"] = "after_tool",
     ) -> bool:
         """提交执行中纠偏；默认等下一批工具完成后再交给模型。"""
         message = content.strip()
@@ -1058,11 +1059,11 @@ class EventDrivenAgent:
         state["last_response_usage"] = normalized
 
     def _record_context_usage(
-        self,
-        state: AgentState,
-        usage: dict[str, int],
-        *,
-        stage: str,
+            self,
+            state: AgentState,
+            usage: dict[str, int],
+            *,
+            stage: str,
     ) -> None:
         """Use provider-reported input tokens as the authoritative context measurement."""
         normalized = normalize_usage(usage)
@@ -1091,8 +1092,8 @@ class EventDrivenAgent:
 
     @staticmethod
     def _merge_skills(
-        existing: list[dict[str, Any]],
-        selected: list[dict[str, Any]],
+            existing: list[dict[str, Any]],
+            selected: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         merged = {str(skill.get("name")): skill for skill in existing if skill.get("name")}
         for skill in selected:
@@ -1112,17 +1113,17 @@ class EventDrivenAgent:
         reflection = state.get("reflection") or {}
         return str(reflection.get("feedback") or "") or None
 
-    def set_mode(self, mode: str) -> None:
+    def set_mode(self, mode: RunMode) -> None:
         self.config.mode = mode
 
     def configure_context(
-        self,
-        *,
-        max_tokens: int | None = None,
-        compact_threshold: float | None = None,
-        keep_recent_tokens: int | None = None,
-        reset: bool = False,
-        persist: bool = True,
+            self,
+            *,
+            max_tokens: int | None = None,
+            compact_threshold: float | None = None,
+            keep_recent_tokens: int | None = None,
+            reset: bool = False,
+            persist: bool = True,
     ) -> dict[str, int | float]:
         """Update context limits and keep all runtime components in sync."""
         defaults = RuntimeConfig()
@@ -1164,9 +1165,9 @@ class EventDrivenAgent:
         }
 
     def update_model(
-        self,
-        model_name: str,
-        reasoning_effort: str | None = None,
+            self,
+            model_name: str,
+            reasoning_effort: str | None = None,
     ) -> OpenAICompatibleModel:
         if not isinstance(self.model, OpenAICompatibleModel):
             raise TypeError("当前模型客户端不支持动态更新")

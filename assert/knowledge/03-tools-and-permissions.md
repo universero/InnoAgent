@@ -226,7 +226,6 @@ Runtime 按顺序授权，遇到首个 `needs_confirmation` 就停止：此前�
 | `ask` | 写工具和 Shell 默认询问，命中持久 allow 时跳过 |
 | `auto` | 自动执行，但 deny、路径边界和其他 Guardrail 仍生效 |
 | `readonly` | 阻止所有 `is_write=True` 工具 |
-| `confirm` | 兼容旧配置，规范化为 `ask` |
 
 审批选项：
 

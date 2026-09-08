@@ -15,6 +15,8 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from core.guardrails.policy import RunMode
+
 
 class ToolCall(BaseModel):
     """A validated request to execute one tool."""
@@ -126,7 +128,7 @@ class EmptyInput(ToolInput):
 class ToolContext:
     """Execution context available to a tool and guardrails."""
 
-    mode: Literal["auto", "ask", "confirm", "readonly"] = "ask"
+    mode: RunMode = RunMode.ASK
     allowed_roots: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     approved_tool_calls: list[dict[str, Any]] = field(default_factory=list)
