@@ -152,11 +152,38 @@ def detect_color_scheme(
         return terminal_background
 
     current_platform = platform.system() if platform_name is None else platform_name
-    if current_platform == "Darwin":
+    if current_platform == "Darwin":  # macos theme
         reader = macos_appearance_reader or _read_macos_appearance
         appearance = reader()
         if appearance and appearance.strip().casefold() == "dark":
             return "dark"
+    elif current_platform == "Windows": # windows theme
+        import winreg
+        try:
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return "light" if value else "dark"
+        except (FileNotFoundError, OSError):
+            pass
+    elif current_platform.lower().startswith("linux"):
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            value = result.stdout.strip().strip("'")
+            if value == "prefer-dark":
+                return "dark"
+            if value == "prefer-light":
+                return "light"
+        except (OSError, subprocess.SubprocessError):
+            pass
     return "light"
 
 
