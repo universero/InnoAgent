@@ -13,7 +13,7 @@
 | `core/agent/model_stream.py` | 将 Provider 流转换为确定性的 `ModelBatch` |
 | `core/agent/stages.py` | Planning 和 Reflection 两个独立子图 |
 | `core/runtime/state.py` | `AgentState` 与初始状态 |
-| `core/runtime/config.py` | 运行预算、模式和工作区配置 |
+| `core/runtime/config.py` | 统一的运行预算、模式、工作区和模型配置 |
 | `core/runtime/agent.py` | `InnoAgentRuntime` 兼容名称 |
 
 ## 为什么选择 LangGraph

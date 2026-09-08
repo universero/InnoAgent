@@ -18,16 +18,16 @@
 
 `main()` 保持明确的四步装配：
 
-1. 创建 `RuntimeConfig`，默认 workspace 为当前目录、模式为 ask。
-2. 使用 `ModelConfigLoader` 解析模型凭据和端点。
+1. 使用 `ConfigStore` 加载统一的 `RuntimeConfig`，默认 workspace 为当前目录、模式为 ask。
+2. 从同一配置中取得模型凭据和端点。
 3. 创建 `OpenAICompatibleModel` 和 `EventDrivenAgent`。
 4. 创建 `InnoAgentCLI` 并进入 REPL/TUI。
 
 ```mermaid
 flowchart LR
-    Main[main.py] --> RuntimeConfig
-    Main --> ModelConfigLoader
-    ModelConfigLoader --> Model[OpenAICompatibleModel]
+    Main[main.py] --> ConfigStore[ConfigStore]
+    ConfigStore --> RuntimeConfig[RuntimeConfig]
+    RuntimeConfig --> Model[OpenAICompatibleModel]
     RuntimeConfig --> Agent[EventDrivenAgent]
     Model --> Agent
     Agent --> CLI[InnoAgentCLI]
@@ -57,7 +57,7 @@ flowchart LR
 - profile/session 路径。
 - Memory 开关和阈值。
 
-配置使用 dataclass，适合当前本地应用和测试覆盖。若未来来源增多，应增加显式校验和版本，而不是在各模块散落环境变量读取。
+配置使用 dataclass，适合当前本地应用和测试覆盖。若未来来源增多，应增加显式校验和版本，而不是在各模块散落 YAML 读取。
 
 ## 兼容 Runtime 名称
 

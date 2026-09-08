@@ -105,7 +105,7 @@ Runtime 在 projected usage 达到 `max_context_tokens * compact_threshold` 时�
 | `/context keep 12k` | 设置压缩后保留的最近完整历史预算 |
 | `/context reset` | 恢复默认参数 |
 
-配置保存在 `.innoagent/config.json` 的 `runtime` 对象中。保存采用 merge，不覆盖同一文件里的 API Key、Base URL、模型和 reasoning effort。修改后 Runtime 会同步更新 `ContextBuilder.max_tokens` 与 `ContextCompactor.keep_recent_tokens`，无需重启。
+配置保存在 `.innoagent/config.yaml` 中，运行时上下文参数和模型参数统一持久化。修改后 Runtime 会同步更新 `ContextBuilder.max_tokens` 与 `ContextCompactor.keep_recent_tokens`，无需重启。
 
 `ContextCompactor.compact()` 的步骤：
 

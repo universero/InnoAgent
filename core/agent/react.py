@@ -19,8 +19,7 @@ from core.memory.profile import ProfileStore
 from core.memory.recall import MemoryRecall
 from core.memory.thresholds import MemoryThresholds
 from core.memory.update import MemoryUpdater
-from core.runtime.config import RuntimeConfig, RuntimeConfigStore
-from core.runtime.model_config import ModelConfig, ModelConfigLoader
+from core.runtime.config import ConfigStore, RuntimeConfig
 from core.runtime.state import AgentState, initial_state, reset_goal_scope, reset_turn_scope
 from core.runtime.usage import accumulate_usage, normalize_usage
 from core.session.compression import ContextCompactor, estimate_message_tokens
@@ -72,21 +71,15 @@ class EventDrivenAgent:
             model: BaseModelClient | None = None,
             registry: ToolRegistry | None = None,
             stream_handler: Callable[[dict[str, Any]], None] | None = None,
-            model_config: ModelConfig | None = None,
-            model_config_loader: ModelConfigLoader | None = None,
             summarizer: Callable[[str], str] | None = None,
     ) -> None:
         if model is None:
             raise ValueError("EventDrivenAgent requires a model client")
         self.config = config or RuntimeConfig()
-        self.runtime_config_store = RuntimeConfigStore(self.config.workspace_root)
+        self.config_store = ConfigStore(self.config.workspace_root)
         self.registry = _register_builtin_tools(registry or ToolRegistry())
         self.model = model
         self.stream_handler = stream_handler
-        self.model_config = model_config
-        self.model_config_loader = model_config_loader or ModelConfigLoader(
-            project_root=self.config.workspace_root
-        )
         self.profile_store = ProfileStore(self.config.profile_root)
         self.session_store = SessionStore(self.config.session_root)
         self.permission_store = PermissionStore(self.config.workspace_root)
@@ -1166,18 +1159,14 @@ class EventDrivenAgent:
         if keep_recent_tokens is None and resolved_keep >= threshold_tokens:
             resolved_keep = max(1, threshold_tokens // 4)
 
-        RuntimeConfigStore._validate(resolved_max, resolved_threshold, resolved_keep)
+        ConfigStore._validate(resolved_max, resolved_threshold, resolved_keep)
         self.config.max_context_tokens = resolved_max
         self.config.compact_threshold = resolved_threshold
         self.config.compact_keep_recent_tokens = resolved_keep
-        self.config.compact_reserve_tokens = max(
-            1,
-            resolved_max - self.config.compact_threshold_tokens,
-        )
         self.context_builder.max_tokens = resolved_max
         self.compactor.keep_recent_tokens = resolved_keep
         if persist:
-            self.runtime_config_store.save(self.config)
+            self.config_store.save(self.config)
         return {
             "max_context_tokens": resolved_max,
             "compact_threshold": resolved_threshold,
@@ -1203,10 +1192,9 @@ class EventDrivenAgent:
         )
         self.model_stream.model = self.model
         self.stages.model = self.model
-        if self.model_config:
-            self.model_config.model = model_name
-            self.model_config.reasoning_effort = effort
-            self.model_config_loader.save(self.model_config)
+        self.config.model = model_name
+        self.config.reasoning_effort = effort
+        self.config_store.save(self.config)
         return self.model
 
     def list_models(self) -> list[str]:

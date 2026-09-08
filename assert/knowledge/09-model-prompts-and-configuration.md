@@ -12,8 +12,7 @@
 | `core/llm/responses.py` | OpenAI-compatible Responses API 与 SSE 解析 |
 | `core/agent/model_stream.py` | 将事件流聚合为 Runtime 使用的 `ModelBatch` |
 | `core/prompts.py` | 系统、Planning、Reflection、Compaction、Subagent 提示词 |
-| `core/runtime/model_config.py` | 模型凭据和端点配置加载 |
-| `core/runtime/config.py` | 与模型调用相关的运行预算 |
+| `core/runtime/config.py` | 统一的运行预算、模型凭据和端点配置加载 |
 
 ## 模型抽象
 
@@ -135,14 +134,13 @@ ModelBatch
 
 ## 模型配置优先级
 
-`ModelConfigLoader.load()` 使用：
+`ConfigStore.load()` 使用：
 
-1. `<project>/.innoagent/config.json`
-2. `OPENAI_API_KEY` 等环境变量
-3. `~/.innoagent/config.json`
-4. 交互输入并选择项目或全局保存
+1. `<project>/.innoagent/config.yaml`
+2. `~/.innoagent/config.yaml`
+3. 交互输入并保存到项目配置
 
-项目配置优先是为了允许仓库选择特定端点和模型；环境变量高于全局配置，方便 CI 和临时会话覆盖。
+项目配置优先是为了允许仓库选择特定端点和模型；全局配置作为跨仓库兜底。
 
 配置字段：
 
@@ -167,7 +165,7 @@ TTY 中的 CLI `/model` 先调用 `OpenAICompatibleModel.list_models()`，使用
 2. 校验 reasoning effort 枚举。
 3. 创建新的 `OpenAICompatibleModel`。
 4. 同时重绑定主 `model_stream` 和 `StageRunner.model`。
-5. 更新并持久化 ModelConfig。
+5. 更新并持久化 `RuntimeConfig`。
 
 Subagent 使用共享 ModelStreamConsumer，因此也会使用新模型。重绑定必须覆盖所有阶段，否则主 Agent 与 Planning/Reflection 会出现模型配置漂移。
 
@@ -175,9 +173,7 @@ Subagent 使用共享 ModelStreamConsumer，因此也会使用新模型。重绑
 
 ## 凭据处理
 
-交互读取 API Key 时使用 `getpass` 隐藏输入。配置文件不会写入事件或 Context，但当前仍是明文 JSON。
-
-使用项目配置的风险是误提交到 Git。仓库必须忽略 `.innoagent/config.json`；生产版本应优先环境注入或 OS keychain，并设置最小文件权限。
+配置文件统一存放在项目 `.innoagent/config.yaml` 中；模型参数和运行时上下文参数使用同一套 YAML 字段。API Key 是否明文由调用方自行决定，配置逻辑不额外处理脱敏。
 
 ## 网络与错误边界
 

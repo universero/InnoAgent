@@ -246,7 +246,7 @@ Context rail 优先使用最近一次主 Agent 响应的 `input_tokens`，并明
 /context reset                   恢复默认值
 ```
 
-配置写入项目 `.innoagent/config.json` 的 `runtime` 区域；更新 runtime 或模型配置时都会合并原文件，不会互相覆盖。
+所有需要持久化的运行时参数和模型参数统一写入项目 `.innoagent/config.yaml`。
 
 ## Skills 与 Subagent
 
@@ -272,18 +272,18 @@ uv run python main.py
 
 模型配置读取顺序：
 
-1. 当前仓库 `.innoagent/config.json`
-2. `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`INNOAGENT_REASONING_EFFORT`
-3. `~/.innoagent/config.json`
-4. 首次启动交互配置
+1. 当前仓库 `.innoagent/config.yaml`
+2. `~/.innoagent/config.yaml`
+3. 首次启动交互配置
 
-```json
-{
-  "api_key": "...",
-  "base_url": "https://api.openai.com/v1",
-  "model": "gpt-5",
-  "reasoning_effort": "medium"
-}
+```yaml
+api_key: "..."
+base_url: "https://api.openai.com/v1"
+model: "gpt-5"
+reasoning_effort: "medium"
+max_context_tokens: 128000
+compact_threshold: 0.8
+compact_keep_recent_tokens: 12000
 ```
 
 ## Slash 命令

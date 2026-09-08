@@ -16,6 +16,15 @@ from core.prompts import SYSTEM_PROMPT
 from core.llm.base import BaseModelClient, ModelDecision, ToolCallDecision
 
 
+MODEL_REQUEST_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=180.0,
+    write=60.0,
+    pool=10.0,
+)
+MODEL_TIMEOUT_MESSAGE = "模型调用失败：请求超时，已关闭当前连接。"
+
+
 def _token_count(value: Any) -> int:
     """将 Provider token 值安全收敛为非负整数。"""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -118,19 +127,22 @@ class OpenAICompatibleModel(BaseModelClient):
     ) -> ModelDecision:
         """调用 Responses API 并解析 SSE 事件流。"""
         payload = self._build_payload(context, tool_schemas, state=state)
-        with httpx.stream(
-            "POST",
-            f"{self.base_url}/responses",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json=payload,
-            timeout=60,
-        ) as response:
-            response.raise_for_status()
-            parsed = self._parse_stream(
-                response,
-                on_token=on_token,
-                on_thinking=on_thinking,
-            )
+        try:
+            with httpx.stream(
+                "POST",
+                f"{self.base_url}/responses",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+                timeout=MODEL_REQUEST_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                parsed = self._parse_stream(
+                    response,
+                    on_token=on_token,
+                    on_thinking=on_thinking,
+                )
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(MODEL_TIMEOUT_MESSAGE) from exc
         return self._build_decision(parsed["content"], parsed["tool_call_parts"])
 
     def stream_events(
@@ -156,7 +168,7 @@ class OpenAICompatibleModel(BaseModelClient):
             f"{self.base_url}/responses",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json=payload,
-            timeout=60,
+            timeout=MODEL_REQUEST_TIMEOUT,
         ) as response:
             response.raise_for_status()
             for line in response.iter_lines():

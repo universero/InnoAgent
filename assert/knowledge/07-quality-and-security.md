@@ -146,7 +146,7 @@ PathGuard、readonly、审批和精确权限规则只能约束受控工具路径
 
 ### 凭据存储
 
-模型 API Key 可写入项目或用户配置 JSON。当前没有 OS keychain 集成和文件权限强化，项目配置还可能被误提交。应依赖 `.gitignore`、环境变量或后续 keychain backend。
+模型 API Key 可写入项目或用户配置 YAML。当前没有 OS keychain 集成和文件权限强化，项目配置还可能被误提交。应依赖 `.gitignore` 或后续 keychain backend。
 
 ### Memory 污染
 

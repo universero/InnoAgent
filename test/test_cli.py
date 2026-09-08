@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 import unittest
 from contextlib import suppress
@@ -11,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import yaml
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.application.current import set_app
@@ -152,10 +152,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(runtime.config.compact_threshold, 0.75)
             self.assertEqual(runtime.config.compact_threshold_tokens, 48_000)
             self.assertEqual(runtime.compactor.keep_recent_tokens, 8_000)
-            config = json.loads(
-                Path(tmp, ".innoagent", "config.json").read_text(encoding="utf-8")
+            config = yaml.safe_load(
+                Path(tmp, ".innoagent", "config.yaml").read_text(encoding="utf-8")
             )
-            self.assertEqual(config["runtime"]["max_context_tokens"], 64_000)
+            self.assertEqual(config["max_context_tokens"], 64_000)
             self.assertIn("Responses API", outputs[-1])
 
     def test_compact_command_calls_runtime_directly(self) -> None:
