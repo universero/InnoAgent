@@ -665,6 +665,27 @@ class EventDrivenAgent:
             self._finish_turn(result)
             self._save_session(result)
             return result
+        except Exception as exc:
+            state["errors"] = list(state.get("errors", [])) + [
+                {"stage": str(state.get("stage") or "main"), "error": str(exc)}
+            ]
+            state["finished"] = True
+            state["finish_reason"] = "error"
+            state["pending_confirmation"] = None
+            state["pending_tool_calls"] = []
+            state["deferred_tool_calls"] = []
+            try:
+                self._emit(
+                    AgentEvent(
+                        type="turn.failed",
+                        payload={"error": str(exc), "finish_reason": "error"},
+                    )
+                )
+                self._save_session(state)
+            except Exception:
+                # 保留原始异常；此前稳定事件已经尽可能逐条写入。
+                pass
+            raise
         finally:
             self._end_run()
 
@@ -1114,7 +1135,7 @@ class EventDrivenAgent:
         return str(reflection.get("feedback") or "") or None
 
     def set_mode(self, mode: RunMode) -> None:
-        self.config.mode = mode
+        self.config.mode = mode if isinstance(mode, RunMode) else RunMode(mode)
 
     def configure_context(
             self,

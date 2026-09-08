@@ -465,10 +465,12 @@ class InnoAgentCLI:
         ):
             mapped = parse_approval_decision(text)
             if mapped:
-                self.current_state = self.runtime.resolve_approval(
-                    self.current_session_id,
-                    mapped,  # type: ignore[arg-type]
-                )
+                try:
+                    self._resolve_approval(mapped)
+                except ValueError as exc:
+                    self.output_fn(str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    self.output_fn(f"[error] {exc}")
                 return
 
         result = self.runtime.invoke(
@@ -487,10 +489,25 @@ class InnoAgentCLI:
     def _resolve_approval(self, decision: str) -> None:
         if not self.current_session_id:
             return
-        self.current_state = self.runtime.resolve_approval(
-            self.current_session_id,
-            decision,  # type: ignore[arg-type]
-        )
+        try:
+            self.current_state = self.runtime.resolve_approval(
+                self.current_session_id,
+                decision,  # type: ignore[arg-type]
+            )
+        except Exception:
+            self._refresh_current_state()
+            raise
+
+    def _refresh_current_state(self) -> None:
+        if not self.current_session_id:
+            self.current_state = None
+            return
+        try:
+            self.current_state = self.runtime.session_store.load_state(
+                self.current_session_id
+            )
+        except Exception:
+            self.current_state = None
 
     def _request_approval(self) -> None:
         pending = (self.current_state or {}).get("pending_confirmation") or {}
@@ -577,11 +594,8 @@ class InnoAgentCLI:
                 self.output_fn("usage: /approve once|always|deny")
                 return
             try:
-                self.current_state = self.runtime.resolve_approval(
-                    self.current_session_id,
-                    decision,
-                )
-            except ValueError as exc:
+                self._resolve_approval(decision)
+            except Exception as exc:  # noqa: BLE001
                 self.output_fn(str(exc))
         elif name == "steer":
             self.output_fn("No running turn. During execution use /steer [now] <instruction>.")

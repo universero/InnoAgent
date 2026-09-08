@@ -17,6 +17,33 @@ from test.fakes import FakeModel
 class MainLoopTest(unittest.TestCase):
     """Tests for the event-driven agent loop."""
 
+    class TimeoutAfterApprovalModel(BaseModelClient):
+        """Request one shell call, then raise a model timeout."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(
+            self,
+            context,
+            tool_schemas,
+            state=None,
+            on_token=None,
+            on_thinking=None,
+        ):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelDecision(
+                    action="tool_use",
+                    tool_calls=[
+                        ToolCallDecision(
+                            name="shell",
+                            arguments={"command": "echo approved-ok"},
+                        )
+                    ],
+                )
+            raise TimeoutError("simulated model timeout after approval")
+
     class RepeatReadModel(BaseModelClient):
         """Fake model that repeatedly asks to read test.md."""
 
@@ -201,6 +228,32 @@ class MainLoopTest(unittest.TestCase):
             approved = runtime.approve_pending(session_id)
             self.assertTrue((Path(tmp) / "note.txt").exists())
             self.assertTrue(approved.get("finished"))
+
+    def test_failed_approval_resolution_persists_error_state(self) -> None:
+        """A post-approval model timeout must not leave a dangling approval."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    mode=RunMode.ASK,
+                    memory_enabled=False,
+                ),
+                model=self.TimeoutAfterApprovalModel(),
+            )
+            result = runtime.invoke("run shell test")
+            session_id = result["session_id"]
+            self.assertTrue(result.get("pending_confirmation"))
+
+            with self.assertRaises(TimeoutError):
+                runtime.resolve_approval(session_id, "allow_once")
+
+            recovered = runtime.session_store.load_state(session_id)
+            self.assertFalse(recovered.get("pending_confirmation"))
+            self.assertTrue(recovered.get("finished"))
+            self.assertEqual(recovered.get("finish_reason"), "error")
+            self.assertTrue(recovered.get("errors"))
 
     def test_pending_write_blocks_later_read_until_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

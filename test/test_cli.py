@@ -19,9 +19,11 @@ from prompt_toolkit.completion import CompleteEvent
 
 from core.runtime.agent import InnoAgentRuntime
 from core.runtime.config import RuntimeConfig
+from core.guardrails.policy import RunMode
 from core.session.store import SessionRecord
 from observe.traces import TraceStore
 from test.fakes import FakeModel
+from core.llm import BaseModelClient, ModelDecision, ToolCallDecision
 from core.tool.approval import default_approval_options
 from view.cli import InnoAgentCLI
 from view.commands import CommandChoice, command_info, parse_command
@@ -44,6 +46,33 @@ APPROVAL_LABELS = {option.value: option.label for option in _APPROVAL_OPTIONS}
 
 class CliTest(unittest.TestCase):
     """Tests for CLI command and rendering helpers."""
+
+    class TimeoutAfterApprovalModel(BaseModelClient):
+        """Request one shell call, then raise a model timeout."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(
+            self,
+            context,
+            tool_schemas,
+            state=None,
+            on_token=None,
+            on_thinking=None,
+        ):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelDecision(
+                    action="tool_use",
+                    tool_calls=[
+                        ToolCallDecision(
+                            name="shell",
+                            arguments={"command": "echo approved-ok"},
+                        )
+                    ],
+                )
+            raise TimeoutError("simulated model timeout after approval")
 
     def test_parse_slash_command(self) -> None:
         """Verify slash command parsing."""
@@ -75,6 +104,31 @@ class CliTest(unittest.TestCase):
 
             cli._handle_command(parse_command("/mode auto"))
             self.assertEqual(runtime.config.mode, "auto")
+
+    def test_approval_failure_refreshes_cli_state(self) -> None:
+        """A failed approval resolution must not leave stale pending state."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = InnoAgentRuntime(
+                RuntimeConfig(
+                    workspace_root=tmp,
+                    profile_root=str(Path(tmp) / "profiles"),
+                    session_root=str(Path(tmp) / "sessions"),
+                    mode=RunMode.ASK,
+                    memory_enabled=False,
+                ),
+                model=self.TimeoutAfterApprovalModel(),
+            )
+            cli = InnoAgentCLI(runtime, output_fn=lambda _: None)
+            result = runtime.invoke("run shell test")
+            cli.current_session_id = result["session_id"]
+            cli.current_state = result
+
+            with self.assertRaises(TimeoutError):
+                cli._resolve_approval("allow_once")
+
+            self.assertIsNotNone(cli.current_state)
+            self.assertFalse(cli.current_state.get("pending_confirmation"))
+            self.assertEqual(cli.current_state.get("finish_reason"), "error")
 
     def test_context_command_updates_and_persists_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
