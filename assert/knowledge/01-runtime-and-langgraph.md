@@ -8,13 +8,12 @@
 
 | 文件 | 职责 |
 |---|---|
-| `core/agent/react.py` | `EventDrivenAgent`，负责依赖装配、节点实现、审批、纠偏、压缩和持久化 |
+| `core/agent/react.py` | `InnoAgent`，负责依赖装配、节点实现、审批、纠偏、压缩和持久化 |
 | `core/agent/graph.py` | 构造 LangGraph 主图，将 Runtime 节点适配为 `Command` 路由 |
 | `core/agent/model_stream.py` | 将 Provider 流转换为确定性的 `ModelBatch` |
 | `core/agent/stages.py` | Planning 和 Reflection 两个独立子图 |
 | `core/runtime/state.py` | `AgentState` 与初始状态 |
 | `core/runtime/config.py` | 统一的运行预算、模式、工作区和模型配置 |
-| `core/runtime/agent.py` | `InnoAgentRuntime` 兼容名称 |
 
 ## 为什么选择 LangGraph
 
@@ -190,7 +189,7 @@ Runtime 不允许把“模型没有继续说”作为唯一结束依据。当前
 ## 扩展约束
 
 - 新节点必须有清晰输入、输出、路由和终止测试。
-- 不要在 `EventDrivenAgent` 外再启动主 Agent 循环。
+- 不要在 `InnoAgent` 外再启动主 Agent 循环。
 - 长等待应建模为可恢复 interrupt/signal，而不是占用工作线程。
 - 外部副作用必须经 Tool Registry，不能在 Planning、Reflection 或 TUI 中直接执行。
 - 增加状态字段时同步更新初始状态、默认补齐、checkpoint 和事件重建逻辑。

@@ -9,7 +9,6 @@
 | 文件 | 职责 |
 |---|---|
 | `main.py` | 默认 CLI 启动与依赖装配 |
-| `core/runtime/agent.py` | 旧名称 `InnoAgentRuntime` 的兼容导出 |
 | `core/runtime/events.py` | 旧式字典事件构造辅助函数 |
 | `core/compat.py` | 第三方依赖警告隔离 |
 | `core/*/__init__.py` | 稳定导入边界 |
@@ -20,7 +19,7 @@
 
 1. 使用 `ConfigStore` 加载统一的 `RuntimeConfig`，默认 workspace 为当前目录、模式为 ask。
 2. 从同一配置中取得模型凭据和端点。
-3. 创建 `OpenAICompatibleModel` 和 `EventDrivenAgent`。
+3. 创建 `OpenAICompatibleModel` 和 `InnoAgent`。
 4. 创建 `InnoAgentCLI` 并进入 REPL/TUI。
 
 ```mermaid
@@ -59,11 +58,9 @@ flowchart LR
 
 配置使用 dataclass，适合当前本地应用和测试覆盖。若未来来源增多，应增加显式校验和版本，而不是在各模块散落 YAML 读取。
 
-## 兼容 Runtime 名称
+## Runtime 导入
 
-`core/runtime/agent.py` 中 `InnoAgentRuntime` 继承 `EventDrivenAgent`，不增加行为。它保留旧 import 路径，使 UI 和外部调用方能逐步迁移。
-
-兼容类必须保持薄。如果在兼容层加入新逻辑，会出现两个 Runtime 行为来源，最终无法判断哪条路径是标准实现。
+UI 和测试直接使用 `core.agent.react.InnoAgent`，不再通过 `core.runtime.agent` 做无行为兼容包装。
 
 ## 兼容事件辅助
 

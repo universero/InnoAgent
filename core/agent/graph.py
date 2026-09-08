@@ -14,13 +14,13 @@ from langgraph.graph import END, START, StateGraph  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 if TYPE_CHECKING:
-    from core.agent.react import EventDrivenAgent
+    from core.agent.react import InnoAgent
 
 
 class MainAgentGraph:
     """Build the single executable graph used by the runtime."""
 
-    def __init__(self, runtime: "EventDrivenAgent") -> None:
+    def __init__(self, runtime: "InnoAgent") -> None:
         self.runtime = runtime
         self.checkpointer = InMemorySaver()
         self.compiled = self._build()

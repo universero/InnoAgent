@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.runtime.config import RuntimeConfig
 from core.session.store import SessionRecord, SessionStore
 from core.tool.approval import ApprovalRequest
@@ -18,7 +18,7 @@ from test.fakes import FakeModel
 class SessionTest(unittest.TestCase):
     """Tests for session identifiers and JSONL persistence."""
 
-    def _runtime(self, tmp: str) -> InnoAgentRuntime:
+    def _runtime(self, tmp: str) -> InnoAgent:
         """Build a runtime with isolated storage."""
         config = RuntimeConfig(
             workspace_root=tmp,
@@ -26,7 +26,7 @@ class SessionTest(unittest.TestCase):
             session_root=str(Path(tmp) / "sessions"),
             memory_enabled=False,
         )
-        return InnoAgentRuntime(config, model=FakeModel())
+        return InnoAgent(config, model=FakeModel())
 
     def test_session_id_is_datetime_based(self) -> None:
         """Verify session ids use a datetime format."""

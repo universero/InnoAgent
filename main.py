@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.agent.react import EventDrivenAgent
+from core.agent.react import InnoAgent
 from core.guardrails.policy import RunMode
 from core.runtime.config import ConfigStore, RuntimeConfig
 from core.llm import OpenAICompatibleModel
@@ -21,10 +21,7 @@ def main() -> None:
         model=config.model,
         reasoning_effort=config.reasoning_effort,
     )
-    runtime = EventDrivenAgent(
-        config=config,
-        model=model,
-    )
+    runtime = InnoAgent(config=config, model=model)
     cli = InnoAgentCLI(runtime)
     cli.run()
 

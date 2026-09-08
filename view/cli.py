@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.tool.approval import ApprovalRequest, parse_approval_decision
 from view.commands import Command, CommandChoice, command_help_text, parse_command
 from view.render import render_event, render_sessions, render_state, render_tools
@@ -40,7 +40,7 @@ _REASONING_EFFORT_DESCRIPTIONS = {
 class InnoAgentCLI:
     """Stateful slash-command frontend with test-friendly adapters."""
 
-    def __init__(self, runtime: InnoAgentRuntime, input_fn=None, output_fn=None) -> None:
+    def __init__(self, runtime: InnoAgent, input_fn=None, output_fn=None) -> None:
         self.runtime = runtime
         self.current_session_id: str | None = None
         self.current_state: dict[str, Any] | None = None

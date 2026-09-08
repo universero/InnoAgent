@@ -1,5 +1,5 @@
 """Agent 核心。"""
 
-from core.agent.react import EventDrivenAgent
+from core.agent.react import InnoAgent
 
-__all__ = ["EventDrivenAgent"]
+__all__ = ["InnoAgent"]

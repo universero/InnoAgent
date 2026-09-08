@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from core.llm import BaseModelClient, ModelDecision, ToolCallDecision
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.runtime.config import RuntimeConfig
 
 
@@ -58,7 +58,7 @@ class _QuestionAndApprovalModel(_QuestionModel):
 class UserQuestionTest(unittest.TestCase):
     def test_ask_user_pauses_and_answer_resumes_same_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=f"{tmp}/profiles",
@@ -86,7 +86,7 @@ class UserQuestionTest(unittest.TestCase):
 
     def test_approval_resume_preserves_a_question_from_the_same_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=f"{tmp}/profiles",

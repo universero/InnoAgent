@@ -17,7 +17,7 @@ from prompt_toolkit.application.current import set_app
 from prompt_toolkit.document import Document
 from prompt_toolkit.completion import CompleteEvent
 
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.runtime.config import RuntimeConfig
 from core.guardrails.policy import RunMode
 from core.session.store import SessionRecord
@@ -87,7 +87,7 @@ class CliTest(unittest.TestCase):
         """Verify only ask, auto, and readonly are accepted."""
         with tempfile.TemporaryDirectory() as tmp:
             outputs: list[str] = []
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -108,7 +108,7 @@ class CliTest(unittest.TestCase):
     def test_approval_failure_refreshes_cli_state(self) -> None:
         """A failed approval resolution must not leave stale pending state."""
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -133,7 +133,7 @@ class CliTest(unittest.TestCase):
     def test_context_command_updates_and_persists_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             outputs: list[str] = []
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -160,7 +160,7 @@ class CliTest(unittest.TestCase):
 
     def test_compact_command_calls_runtime_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -310,7 +310,7 @@ class CliTest(unittest.TestCase):
 
     def test_non_tty_uses_plain_input_without_prompt_toolkit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -879,7 +879,7 @@ class CliTest(unittest.TestCase):
 
     def test_pending_approval_uses_selector_without_user_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -935,7 +935,7 @@ class CliTest(unittest.TestCase):
 
     def test_quit_during_work_requests_stop_then_exits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -976,7 +976,7 @@ class CliTest(unittest.TestCase):
 
     def test_busy_tui_input_is_routed_to_runtime_steering(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1010,7 +1010,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             from core.llm import OpenAICompatibleModel
 
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1076,7 +1076,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             from core.llm import OpenAICompatibleModel
 
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1100,7 +1100,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             from core.llm import OpenAICompatibleModel
 
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1122,7 +1122,7 @@ class CliTest(unittest.TestCase):
 
     def test_pending_user_question_rejects_model_control_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1157,7 +1157,7 @@ class CliTest(unittest.TestCase):
 
     def test_resume_command_uses_session_selector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1255,7 +1255,7 @@ class CliTest(unittest.TestCase):
 
     def test_tui_resume_replays_persisted_transcript_without_state_duplication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1405,7 +1405,7 @@ class CliTest(unittest.TestCase):
                 session_root=str(Path(tmp) / "sessions"),
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             output: list[str] = []
             cli = InnoAgentCLI(runtime, input_fn=lambda prompt="": "", output_fn=output.append)
             cli._handle_command(parse_command("/goal create file"))
@@ -1418,7 +1418,7 @@ class CliTest(unittest.TestCase):
 
     def test_goal_command_passes_goal_as_user_input_and_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1449,7 +1449,7 @@ class CliTest(unittest.TestCase):
 
     def test_tui_goal_command_runs_as_steerable_agent_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1484,7 +1484,7 @@ class CliTest(unittest.TestCase):
 
     def test_rename_creates_an_empty_current_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1509,7 +1509,7 @@ class CliTest(unittest.TestCase):
 
     def test_goal_without_argument_reports_without_clearing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -1536,7 +1536,7 @@ class CliTest(unittest.TestCase):
                 memory_enabled=False,
             )
             cli = InnoAgentCLI(
-                InnoAgentRuntime(config, model=FakeModel()),
+                InnoAgent(config, model=FakeModel()),
                 input_fn=lambda prompt="": "",
                 output_fn=lambda value: None,
             )
@@ -1560,7 +1560,7 @@ class CliTest(unittest.TestCase):
                 memory_enabled=False,
             )
             cli = InnoAgentCLI(
-                InnoAgentRuntime(config, model=FakeModel()),
+                InnoAgent(config, model=FakeModel()),
                 input_fn=lambda prompt="": "",
                 output_fn=lambda value: None,
             )

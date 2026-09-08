@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from core.event.events import AgentEvent
 from core.agent.model_stream import ModelBatch
 from core.llm import BaseModelClient, ModelDecision, OpenAICompatibleModel, ToolCallDecision
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.runtime.config import RuntimeConfig
 from core.session.store import SessionRecord
 from core.tool.base import BaseTool, ToolContext, ToolResult
@@ -189,7 +189,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
     def test_subagent_uses_isolated_read_only_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "note.txt").write_text("evidence", encoding="utf-8")
-            runtime = InnoAgentRuntime(self._config(tmp), model=_SubagentModel())
+            runtime = InnoAgent(self._config(tmp), model=_SubagentModel())
             result = runtime.invoke("delegate inspection")
             self.assertEqual(result["response"], "parent received subagent report")
             subagent = next(item for item in result["tool_results"] if item["tool_name"] == "subagent")
@@ -205,7 +205,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
     def test_subagent_usage_is_included_in_session_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "note.txt").write_text("evidence", encoding="utf-8")
-            runtime = InnoAgentRuntime(self._config(tmp), model=_UsageSubagentModel())
+            runtime = InnoAgent(self._config(tmp), model=_UsageSubagentModel())
             result = runtime.invoke("delegate inspection")
             self.assertEqual(result["usage"]["total_tokens"], 12)
             self.assertEqual(result["usage"]["cached_tokens"], 4)
@@ -213,7 +213,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
 
     def test_response_usage_is_cumulative_and_drives_context_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(self._config(tmp), model=_UsageOnlyModel())
+            runtime = InnoAgent(self._config(tmp), model=_UsageOnlyModel())
 
             first = runtime.invoke("first request")
             second = runtime.invoke("second request", session_id=first["session_id"])
@@ -233,7 +233,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
             config.max_context_tokens = 1000
             config.compact_threshold = 0.5
             config.compact_keep_recent_tokens = 20
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 config,
                 model=_UsageOnlyModel(),
                 summarizer=lambda _: "older context",
@@ -277,7 +277,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
 
     def test_manual_compaction_persists_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 self._config(tmp),
                 model=_SubagentModel(),
                 summarizer=lambda _: "compact summary",
@@ -303,7 +303,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
 
     def test_model_update_rebinds_all_model_stages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 self._config(tmp),
                 model=OpenAICompatibleModel("key", "https://example.com", "old-model"),
             )
@@ -313,7 +313,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
 
     def test_runtime_exposes_main_plan_and_reflection_graphs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(self._config(tmp), model=_SubagentModel())
+            runtime = InnoAgent(self._config(tmp), model=_SubagentModel())
             main_nodes = set(runtime.graph.compiled.get_graph().nodes)
             plan_nodes = set(runtime.stages.plan_graph.get_graph().nodes)
             reflection_nodes = set(runtime.stages.reflection_graph.get_graph().nodes)
@@ -327,7 +327,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
             release = threading.Event()
             registry = ToolRegistry()
             registry.register(_BlockingTool(started, release))
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 self._config(tmp),
                 model=_SteeringModel(),
                 registry=registry,
@@ -356,7 +356,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             started = threading.Event()
             release = threading.Event()
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 self._config(tmp),
                 model=_BoundaryModel(started, release, first_action="tool_use"),
             )
@@ -383,7 +383,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             started = threading.Event()
             release = threading.Event()
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 self._config(tmp),
                 model=_BoundaryModel(started, release, first_action="finish"),
             )
@@ -411,7 +411,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
             release = threading.Event()
             registry = ToolRegistry()
             registry.register(_BlockingTool(started, release))
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 self._config(tmp),
                 model=_SteeringModel(),
                 registry=registry,
@@ -438,7 +438,7 @@ class AdvancedRuntimeTest(unittest.TestCase):
 
     def test_unexpected_run_error_clears_active_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(self._config(tmp), model=_SubagentModel())
+            runtime = InnoAgent(self._config(tmp), model=_SubagentModel())
 
             def fail_after_completed_event(state):
                 runtime._emit(

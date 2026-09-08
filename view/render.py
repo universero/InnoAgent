@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.session.store import SessionRecord
 from observe.traces import TraceStore
 from view.resume import recent_user_input
@@ -90,7 +90,7 @@ def render_state(state: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_tools(runtime: InnoAgentRuntime, state: dict[str, Any] | None = None) -> str:
+def render_tools(runtime: InnoAgent, state: dict[str, Any] | None = None) -> str:
     """Render the current tool inventory for the CLI."""
     from core.tool.base import ToolContext
 

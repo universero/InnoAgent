@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.guardrails.policy import RunMode
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.runtime.config import RuntimeConfig
 from core.llm import BaseModelClient, ModelDecision, ToolCallDecision
 from test.fakes import FakeModel
@@ -89,7 +89,7 @@ class MainLoopTest(unittest.TestCase):
                 max_iterations=20,
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             goal = "创建 app.py 并打印 Hello, InnoAgent"
             result = runtime.invoke(goal, goal=goal)
             self.assertTrue(result.get("goal_complete"))
@@ -99,7 +99,7 @@ class MainLoopTest(unittest.TestCase):
 
     def test_restarting_goal_clears_previous_goal_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -140,7 +140,7 @@ class MainLoopTest(unittest.TestCase):
 
     def test_new_turn_resets_transient_goal_evidence_but_keeps_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -186,7 +186,7 @@ class MainLoopTest(unittest.TestCase):
                 session_root=str(Path(tmp) / "sessions"),
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             result = runtime.invoke("读取 readme.md")
             self.assertTrue(result.get("finished"))
             self.assertIn("hello from temp", result.get("response", ""))
@@ -215,7 +215,7 @@ class MainLoopTest(unittest.TestCase):
                 mode=RunMode.ASK,
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             result = runtime.invoke("写入 note.txt 内容 hello")
             self.assertEqual(result.get("pending_confirmation", {}).get("tool_name"), "write")
             self.assertFalse(
@@ -232,7 +232,7 @@ class MainLoopTest(unittest.TestCase):
     def test_failed_approval_resolution_persists_error_state(self) -> None:
         """A post-approval model timeout must not leave a dangling approval."""
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -259,7 +259,7 @@ class MainLoopTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "value.txt"
             path.write_text("old", encoding="utf-8")
-            runtime = InnoAgentRuntime(
+            runtime = InnoAgent(
                 RuntimeConfig(
                     workspace_root=tmp,
                     profile_root=str(Path(tmp) / "profiles"),
@@ -296,7 +296,7 @@ class MainLoopTest(unittest.TestCase):
                 session_root=str(Path(tmp) / "sessions"),
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=self.RepeatReadModel())
+            runtime = InnoAgent(config, model=self.RepeatReadModel())
             result = runtime.invoke("读test.md")
             self.assertTrue(result.get("finished"))
             self.assertEqual(result.get("response"), "its a test")
@@ -318,7 +318,7 @@ class MainLoopTest(unittest.TestCase):
                 session_root=str(Path(tmp) / "sessions"),
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=self.StreamTextModel())
+            runtime = InnoAgent(config, model=self.StreamTextModel())
             runtime.invoke("hello")
             text_events = [
                 event

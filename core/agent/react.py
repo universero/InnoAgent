@@ -62,7 +62,7 @@ def _register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     return registry
 
 
-class EventDrivenAgent:
+class InnoAgent:
     """Own the model loop, tools, permissions, context, and session events."""
 
     def __init__(

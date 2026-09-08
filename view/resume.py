@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.session.store import SessionRecord
 
 
@@ -25,7 +25,7 @@ _REPLAYABLE_EVENT_TYPES = {
 }
 
 
-def pick_session(runtime: InnoAgentRuntime, session_id: str | None) -> SessionRecord | None:
+def pick_session(runtime: InnoAgent, session_id: str | None) -> SessionRecord | None:
     """Resolve an id/name/prefix, or fall back to the most recent session."""
     if session_id:
         try:

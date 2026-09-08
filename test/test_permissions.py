@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from core.config.permissions import PermissionStore
-from core.runtime.agent import InnoAgentRuntime
+from core.agent.react import InnoAgent
 from core.runtime.config import RuntimeConfig
 from core.tool.base import ToolContext
 from core.tool.registry import ToolRegistry
@@ -100,12 +100,12 @@ class PermissionTest(unittest.TestCase):
                 mode="ask",
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             pending = runtime.invoke("创建 note.txt 内容 hello")
             self.assertTrue(pending.get("pending_confirmation"))
             runtime.resolve_approval(pending["session_id"], "allow_always")
 
-            second = InnoAgentRuntime(config, model=FakeModel())
+            second = InnoAgent(config, model=FakeModel())
             result = second.invoke("创建 note.txt 内容 hello")
             self.assertFalse(result.get("pending_confirmation"))
             self.assertEqual((Path(tmp) / "note.txt").read_text(), "hello")
@@ -119,7 +119,7 @@ class PermissionTest(unittest.TestCase):
                 mode="ask",
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             pending = runtime.invoke("写入 denied.txt 内容 no")
             result = runtime.resolve_approval(pending["session_id"], "deny")
             self.assertFalse((Path(tmp) / "denied.txt").exists())
@@ -134,7 +134,7 @@ class PermissionTest(unittest.TestCase):
                 mode="ask",
                 memory_enabled=False,
             )
-            runtime = InnoAgentRuntime(config, model=FakeModel())
+            runtime = InnoAgent(config, model=FakeModel())
             pending = runtime.invoke("写入 unsafe.txt 内容 no")
 
             with self.assertRaisesRegex(ValueError, "invalid approval decision"):

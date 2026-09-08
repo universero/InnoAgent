@@ -102,7 +102,7 @@ view/
 └── commands.py                # 命令注册、解析和补全元数据
 ```
 
-`core/runtime/agent.py` 只提供稳定入口和兼容导出。业务执行逻辑只能有一份。
+`core/agent/react.py` 是 `InnoAgent` 的唯一业务入口，业务执行逻辑只能有一份。
 
 ## 4. 主 Agent 状态图
 
