@@ -134,7 +134,7 @@ class FileConfirmationGuard(BaseGuardrail):
                 )
             if decision == "allow":
                 return GuardrailDecision()
-        if context.mode.is_readonly() and tool.is_write:
+        if context.mode.is_readonly and tool.is_write:
             return GuardrailDecision(
                 allowed=False,
                 status="blocked",
